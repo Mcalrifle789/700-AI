@@ -69,7 +69,12 @@ async function runCommand(name, arg, { history, allSkills }) {
     case 'model': await switchModel(); return;
     case 'image': await doImage(arg); return;
     case 'build': await doBuild(arg, history); return;
-    case 'voice': console.log(c.dim('\n  Voice needs the ') + c.white('ElevenLabs') + c.dim(' plugin. Try ') + c.white('/plugins') + c.dim('.\n')); return;
+    case 'voice': {
+      const vs = allSkills.find((s) => s.name === 'voice' && s.plugin);
+      if (vs?.run) { await vs.run(arg); return; }
+      console.log(c.dim('\n  Voice needs the ') + c.white('ElevenLabs') + c.dim(' plugin. Try ') + c.white('/plugins') + c.dim('.\n'));
+      return;
+    }
     case 'clear': history.length = 0; console.clear(); renderSplash(); return;
     case 'exit': case 'quit': console.log(c.dim('\n  bye ✦\n')); return 'exit';
     default: {

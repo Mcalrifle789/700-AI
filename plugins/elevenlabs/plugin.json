@@ -1,0 +1,8 @@
+{
+  "id": "elevenlabs",
+  "name": "ElevenLabs Voice",
+  "version": "1.0.0",
+  "price": 0,
+  "entry": "index.js",
+  "description": "Text-to-speech with your ElevenLabs API key."
+}
