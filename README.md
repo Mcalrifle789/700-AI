@@ -95,4 +95,4 @@ default media player.
 
 ## License
 
-MIT — see `LICENSE` (added separately).
+Proprietary — all rights reserved. See [`LICENSE`](LICENSE).
