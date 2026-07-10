@@ -6,9 +6,6 @@ import { PRESETS } from './providers.js';
 
 export const SEARCH_PROVIDERS = [
   { id: 'none', title: 'None / skip', needsKey: false },
-  { id: 'brave', title: 'Brave Search  (API key required)', needsKey: true },
-  { id: 'tavily', title: 'Tavily  (API key required)', needsKey: true },
-  { id: 'serper', title: 'Serper (Google)  (API key required)', needsKey: true },
   { id: 'duckduckgo', title: 'DuckDuckGo  (no key, limited)', needsKey: false },
 ];
 

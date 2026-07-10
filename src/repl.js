@@ -11,6 +11,7 @@ import { STORE, priceLabel, installPlugin, loadPlugins } from './plugins.js';
 import { openWallet } from './wallet.js';
 import { manageAgents, findAgent } from './agents.js';
 import { startPreview } from './build/preview.js';
+import { webSearch } from './search.js';
 
 export async function startRepl() {
   renderSplash();
@@ -69,6 +70,7 @@ async function runCommand(name, arg, { history, allSkills }) {
     case 'model': await switchModel(); return;
     case 'image': await doImage(arg); return;
     case 'build': await doBuild(arg, history); return;
+    case 'search': await doSearch(arg, history); return;
     case 'voice': {
       const vs = allSkills.find((s) => s.name === 'voice' && s.plugin);
       if (vs?.run) { await vs.run(arg); return; }
@@ -174,6 +176,45 @@ async function doImage(arg) {
   } catch (e) {
     console.log(c.red('  image failed: ') + c.dim(e.message) + '\n');
   }
+}
+
+// Search mode: query the configured provider, print results, and (if a chat
+// provider is set) synthesize a cited answer grounded in those results.
+async function doSearch(arg, history) {
+  const cfg = config.read();
+  const query = arg || (await prompts({ type: 'text', name: 'q', message: 'Search:' })).q;
+  if (!query) return;
+
+  console.log(c.dim('\n  searching ' + (cfg.search?.id || 'none') + '…'));
+  let results;
+  try {
+    results = await webSearch(cfg.search, query);
+  } catch (e) {
+    console.log(c.red('\n  search failed: ') + c.dim(e.message) + '\n');
+    return;
+  }
+  if (!results.length) { console.log(c.dim('\n  No results.\n')); return; }
+
+  console.log('');
+  results.forEach((r, i) => {
+    console.log('  ' + c.gold(`${i + 1}.`) + ' ' + c.white(r.title));
+    if (r.url) console.log('     ' + c.orange(r.url));
+    if (r.snippet) console.log('     ' + c.dim(truncate(r.snippet, 160)));
+    console.log('');
+  });
+
+  if (cfg.provider) {
+    const context = results.map((r, i) => `[${i + 1}] ${r.title}\n${r.url}\n${r.snippet}`).join('\n\n');
+    const sys = 'Answer the user question using ONLY the search results provided. Cite sources inline as [n]. If the results are insufficient, say so.';
+    await streamChat(
+      [{ role: 'system', content: sys }, { role: 'user', content: `Question: ${query}\n\nSearch results:\n${context}` }],
+      history, `search: ${query}`,
+    );
+  }
+}
+
+function truncate(s, n) {
+  return s.length > n ? s.slice(0, n - 1) + '…' : s;
 }
 
 // Build mode: model returns files; each is streamed into the live window.
