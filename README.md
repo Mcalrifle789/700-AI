@@ -29,16 +29,34 @@ type leaves your computer except the API calls you make to your chosen provider.
 
 ## Install
 
+Clone the repo and install dependencies:
+
 ```bash
+gh repo clone Mcalrifle789/700-AI      # with the GitHub CLI
+# or:
+git clone https://github.com/Mcalrifle789/700-AI.git
+
+cd 700-AI
 npm install
-npm start        # launches the interactive terminal
 ```
 
-Or link it as a global command and run `700`:
+Optionally install the global `700` command so you can run it from anywhere:
 
 ```bash
 npm link
-700
+```
+
+## Launch
+
+```bash
+700              # start the interactive terminal   (or: npm start)
+700 setup        # open the guided setup wizard
+```
+
+Then, inside the REPL, list everything you can do:
+
+```
+700 ❯ /skills    # show all active skills / commands
 ```
 
 ## First-run setup
