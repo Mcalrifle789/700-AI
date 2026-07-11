@@ -49,7 +49,7 @@ export function renderSplash() {
   out.push('');
   out.push(pad('', width - 34) + c.white('tab') + c.dim(' agents   ') + c.white('ctrl+p') + c.dim(' commands'));
   out.push('');
-  out.push('  ' + c.gold('●') + ' ' + c.orange('Tip') + c.dim(' Use ') + c.white('/skills') + c.dim(' to list all 35 commands · ') + c.white('700 setup') + c.dim(' to configure'));
+  out.push('  ' + c.gold('●') + ' ' + c.orange('Tip') + c.dim(' Use ') + c.white('/skills') + c.dim(' to list all commands · ') + c.white('700 setup') + c.dim(' to configure'));
   out.push('');
   const footer = c.dim('  ~') + pad('', width - 12) + c.dim(VERSION);
   out.push(footer);

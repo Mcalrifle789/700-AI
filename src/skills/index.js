@@ -1,4 +1,4 @@
-// 700 AI ships with 35 built-in skills/commands.
+// 700 AI ships with 34 built-in skills/commands.
 // `kind: 'prompt'` skills steer the model; `kind: 'action'` skills run local code.
 // Extra skills can be added by plugins via the plugin loader.
 export const SKILLS = [
@@ -62,7 +62,8 @@ export const SKILLS = [
     system: 'Solve the problem step by step, showing work, then box the final answer.' },
   { name: 'json', kind: 'prompt', group: 'code', desc: 'Return structured JSON',
     system: 'Respond ONLY with valid JSON matching the user request. No prose.' },
-  { name: 'voice', kind: 'action', group: 'create', desc: 'Speak a reply aloud (requires ElevenLabs plugin)' },
+  // Note: /voice is provided by the ElevenLabs plugin (see plugins/elevenlabs),
+  // so it is intentionally NOT listed here to avoid a duplicate entry.
 ];
 
 export function getSkill(name) {
