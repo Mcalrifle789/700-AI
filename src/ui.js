@@ -16,6 +16,24 @@ export const glyph = {
 // Actual terminal width (min 40), used for centering.
 export const termWidth = () => Math.max(40, process.stdout.columns || 80);
 
+// Set the terminal window/tab title (OSC 0). No-op when not a TTY.
+export function setTerminalTitle(title) {
+  if (process.stdout.isTTY) process.stdout.write('\x1B]0;' + title + '\x07');
+}
+
+// Take over the whole screen using the alternate screen buffer (like vim/less),
+// clearing it and homing the cursor. Returns true if it engaged. leaveFullscreen
+// restores the user's previous terminal contents on exit.
+export function enterFullscreen() {
+  if (!process.stdout.isTTY) return false;
+  process.stdout.write('\x1B[?1049h\x1B[2J\x1B[H');
+  return true;
+}
+
+export function leaveFullscreen() {
+  if (process.stdout.isTTY) process.stdout.write('\x1B[?1049l');
+}
+
 // Visible length of a string, ignoring ANSI color codes.
 export function visLen(s) {
   return s.replace(/\x1B\[[0-9;]*m/g, '').length;

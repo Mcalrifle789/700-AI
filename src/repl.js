@@ -4,7 +4,7 @@ import prompts from 'prompts';
 import { c, brand } from './theme.js';
 import { config, wallet } from './store.js';
 import { renderSplash, frameLeft } from './splash.js';
-import { spinner, workingAnimation, glyph, centerLine, rule, termWidth } from './ui.js';
+import { spinner, workingAnimation, glyph, centerLine, rule, termWidth, setTerminalTitle, enterFullscreen, leaveFullscreen } from './ui.js';
 import { boxInput } from './input.js';
 import { runSetup, SEARCH_PROVIDERS, chooseModel } from './setup.js';
 import { SKILLS, getSkill } from './skills/index.js';
@@ -16,6 +16,13 @@ import { startPreview } from './build/preview.js';
 import { webSearch } from './search.js';
 
 export async function startRepl() {
+  // Name the terminal tab and take over the full screen (restored on exit).
+  setTerminalTitle('700 AI');
+  if (enterFullscreen()) {
+    process.once('exit', leaveFullscreen);
+    process.once('SIGINT', () => { leaveFullscreen(); process.exit(0); });
+  }
+
   renderSplash();
 
   const ctx = { config, wallet, say: (s) => console.log(s) };
