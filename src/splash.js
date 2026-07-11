@@ -1,63 +1,37 @@
-// The 700 AI welcome screen — mirrors assets/screenshot.png.
-import { c, brand, ember, VERSION } from './theme.js';
+// The 700 AI welcome screen — recreates assets/screenshot.png via the scene
+// compositor (ember/nebula wallpaper + glowing wordmark + input card). Falls
+// back to a plain banner if the compositor can't run (tiny/odd terminals).
+import { c, brand, VERSION } from './theme.js';
 import { config } from './store.js';
+import { centerLine, termWidth, glyph } from './ui.js';
+import { buildScene, sceneFrameLeft } from './scene.js';
 
-// Blocky "700 AI" wordmark rendered to match the brand image feel.
-const WORDMARK = [
-  ' ███████╗  ██████╗   ██████╗      █████╗  ██╗',
-  ' ╚════██║ ██╔═══██╗ ██╔═══██╗    ██╔══██╗ ██║',
-  '     ██╔╝ ██║   ██║ ██║   ██║    ███████║ ██║',
-  '    ██╔╝  ██║   ██║ ██║   ██║    ██╔══██║ ██║',
-  '    ██║   ╚██████╔╝ ╚██████╔╝    ██║  ██║ ██║',
-  '    ╚═╝    ╚═════╝   ╚═════╝     ╚═╝  ╚═╝ ╚═╝',
-];
-
-function pad(line, width) {
-  const visible = line.replace(/\[[0-9;]*m/g, '');
-  const gap = Math.max(0, width - visible.length);
-  return line + ' '.repeat(gap);
-}
+// Left edge of the input card, so the REPL prompt lines up under it.
+let _frameLeft = 4;
+export function frameLeft() { return _frameLeft; }
 
 export function renderSplash() {
   const cfg = config.read();
-  const width = Math.min(process.stdout.columns || 80, 92);
-  const provider = cfg.provider;
-  const modelLabel = provider?.model || 'Claude Opus 4.8';
-  const providerLabel = provider?.label || '700 AI Terminal';
-  const tier = provider ? 'ready' : 'max';
-
-  const out = [];
-  out.push('');
-  for (const row of WORDMARK) out.push('  ' + brand(row));
-  out.push('');
-
-  // input box
-  const inner = width - 6;
-  const top = c.box('  ┌' + '─'.repeat(inner) + '┐');
-  const bottom = c.box('  └' + '─'.repeat(inner) + '┘');
-  const line1 = c.box('  │ ') + pad(c.dim('Ask anything...  ') + c.faint('"Fix a TODO in the codebase"'), inner - 1) + c.box('│');
-  const status =
-    c.red('Build') + c.dim(' · ') + c.white(modelLabel) + c.dim('  ' + providerLabel + '  · ') + c.gold(tier);
-  const line2 = c.box('  │ ') + pad(status, inner - 1) + c.box('│');
-  const blank = c.box('  │ ') + pad('', inner - 1) + c.box('│');
-
-  out.push(top);
-  out.push(line1);
-  out.push(blank);
-  out.push(line2);
-  out.push(bottom);
-  out.push('');
-  out.push(pad('', width - 34) + c.white('tab') + c.dim(' agents   ') + c.white('ctrl+p') + c.dim(' commands'));
-  out.push('');
-  out.push('  ' + c.gold('●') + ' ' + c.orange('Tip') + c.dim(' Use ') + c.white('/skills') + c.dim(' to list all commands · ') + c.white('700 setup') + c.dim(' to configure'));
-  out.push('');
-  const footer = c.dim('  ~') + pad('', width - 12) + c.dim(VERSION);
-  out.push(footer);
-  out.push('');
-
-  process.stdout.write(out.join('\n') + '\n');
-
-  if (!cfg.onboarded) {
-    console.log(c.orange('  First run detected.') + c.dim(' Type ') + c.white('700 setup') + c.dim(' (or ') + c.white('/setup') + c.dim(') to connect a provider.\n'));
+  try {
+    const scene = buildScene(cfg);
+    _frameLeft = sceneFrameLeft();
+    process.stdout.write('\n' + scene + '\n');
+  } catch {
+    renderFallback(cfg);
   }
+  if (!cfg.onboarded) {
+    process.stdout.write('\n' + centerLine(
+      c.orange('First run  ' + glyph.arrow + '  ') + c.dim('run ') + c.white('/setup')
+      + c.dim(' to connect a provider')) + '\n');
+  }
+}
+
+function renderFallback(cfg) {
+  const W = termWidth();
+  const model = cfg.provider ? cfg.provider.model : 'not configured';
+  const out = ['', centerLine(brand('7 0 0   A I'), W), '',
+    centerLine(c.dim('Your terminal.  Any model.  Your keys.'), W),
+    centerLine(c.dim('model ') + c.white(model) + c.dim('  ·  v' + VERSION), W), '',
+    centerLine(c.dim('Type on the ') + c.orange('700 ' + glyph.prompt) + c.dim(' line · ') + c.white('/skills') + c.dim(' for commands'), W), ''];
+  process.stdout.write(out.join('\n') + '\n');
 }

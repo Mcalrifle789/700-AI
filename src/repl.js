@@ -3,7 +3,9 @@ import readline from 'readline';
 import prompts from 'prompts';
 import { c, brand } from './theme.js';
 import { config, wallet } from './store.js';
-import { renderSplash } from './splash.js';
+import { renderSplash, frameLeft } from './splash.js';
+import { spinner, glyph, centerLine, rule, termWidth } from './ui.js';
+import { boxInput } from './input.js';
 import { runSetup, SEARCH_PROVIDERS } from './setup.js';
 import { SKILLS, getSkill } from './skills/index.js';
 import { chatStream, generateImage, PRESETS } from './providers.js';
@@ -21,12 +23,10 @@ export async function startRepl() {
   const allSkills = [...SKILLS, ...pluginSkills];
 
   const history = [];
-  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-  const ask = () => rl.question(c.orange('\n700') + c.dim(' ❯ '), handle);
-
-  async function handle(raw) {
-    const line = raw.trim();
-    if (!line) return ask();
+  for (;;) {
+    const raw = await boxInput({ indent: frameLeft() });
+    const line = (raw || '').trim();
+    if (!line) continue;
 
     // slash-command or bare command
     const isCmd = line.startsWith('/') || getCommand(line);
@@ -34,23 +34,20 @@ export async function startRepl() {
       const [name, ...rest] = line.replace(/^\//, '').split(' ');
       const arg = rest.join(' ');
       const done = await runCommand(name.toLowerCase(), arg, { history, allSkills });
-      if (done === 'exit') { rl.close(); return; }
-      return ask();
+      if (done === 'exit') break;
+      continue;
     }
 
     // @agent routing
     const routed = findAgent(line);
     if (routed) {
       await streamChat([{ role: 'system', content: routed.agent.system }, ...history, { role: 'user', content: routed.message }], history, routed.message, routed.agent.model);
-      return ask();
+      continue;
     }
 
     // plain conversation
     await streamChat([...history, { role: 'user', content: line }], history, line);
-    ask();
   }
-
-  ask();
 }
 
 function getCommand(line) {
@@ -92,23 +89,41 @@ async function runCommand(name, arg, { history, allSkills }) {
   }
 }
 
+// Writes streamed text with a soft left gutter bar on every line.
+function gutterWriter(prefix) {
+  let atStart = true;
+  return (chunk) => {
+    let i = 0;
+    while (i < chunk.length) {
+      if (atStart) { process.stdout.write(prefix); atStart = false; }
+      const nl = chunk.indexOf('\n', i);
+      if (nl === -1) { process.stdout.write(c.white(chunk.slice(i))); break; }
+      process.stdout.write(c.white(chunk.slice(i, nl)) + '\n');
+      atStart = true;
+      i = nl + 1;
+    }
+  };
+}
+
 async function streamChat(messages, history, userText, modelOverride) {
   const cfg = config.read();
   if (!cfg.provider) {
-    console.log(c.orange('\n  No provider configured.') + c.dim(' Run ') + c.white('700 setup') + c.dim(' first.\n'));
+    console.log('\n  ' + c.orange(glyph.warn + ' No provider configured.') + c.dim(' Run ') + c.white('700 setup') + c.dim(' first.\n'));
     return;
   }
   const provider = modelOverride ? { ...cfg.provider, model: modelOverride } : cfg.provider;
-  process.stdout.write('\n' + c.gold('700 ') + c.dim('· ' + provider.model + '\n\n'));
+  const pad = ' '.repeat(frameLeft() + 1);
+  process.stdout.write('\n' + pad + c.gold(glyph.spark + ' 700') + c.dim('  ' + glyph.dot + '  ' + provider.model) + '\n' + pad + c.faint('│') + '\n');
+  const write = gutterWriter(pad + c.faint('│ '));
   let full = '';
   try {
     const controller = new AbortController();
     for await (const delta of chatStream(provider, messages, { signal: controller.signal })) {
-      process.stdout.write(c.white(delta));
+      write(delta);
       full += delta;
     }
   } catch (e) {
-    console.log(c.red('\n  request failed: ') + c.dim(e.message));
+    console.log('\n' + pad + c.red(glyph.err + ' request failed: ') + c.dim(e.message));
     return;
   }
   process.stdout.write('\n');
@@ -116,14 +131,19 @@ async function streamChat(messages, history, userText, modelOverride) {
 }
 
 function printSkills(allSkills) {
-  console.log('\n' + brand(`  700 AI — ${allSkills.length} skills`) + '\n');
+  const W = termWidth();
+  console.log('\n' + centerLine(brand('700 AI') + c.dim('   ' + glyph.dot + '   ' + allSkills.length + ' commands'), W) + '\n');
   const groups = {};
   for (const s of allSkills) (groups[s.group || 'plugin'] ||= []).push(s);
-  for (const [g, list] of Object.entries(groups)) {
-    console.log(c.orange('  ' + g));
+  const order = ['core', 'create', 'code', 'write', 'know', 'plugin'];
+  const label = { core: 'Core', create: 'Create', code: 'Code', write: 'Write', know: 'Knowledge', plugin: 'Plugins' };
+  for (const g of order) {
+    const list = groups[g];
+    if (!list) continue;
+    console.log('  ' + c.orange(glyph.bar) + ' ' + c.orange(label[g] || g));
     for (const s of list) {
-      const tag = s.plugin ? c.gold(' ⧉') : '';
-      console.log('    ' + c.white('/' + s.name.padEnd(12)) + c.dim(s.desc) + tag);
+      const tag = s.plugin ? c.gold('  ' + glyph.spark) : '';
+      console.log('    ' + c.gold(glyph.prompt) + ' ' + c.white(('/' + s.name).padEnd(13)) + c.dim(s.desc) + tag);
     }
     console.log('');
   }
@@ -166,15 +186,16 @@ async function doImage(arg) {
   if (!prompt) return;
   if (!cfg.imageModel) { console.log(c.dim('\n  Enable images in ') + c.white('700 setup') + c.dim('.\n')); return; }
   const win = await startPreview('700 AI — Image');
-  console.log(c.dim('\n  generating…'));
+  console.log('');
+  const sp = spinner('generating image…');
   try {
     const provider = { ...cfg.provider, model: cfg.imageModel.model };
     const url = await generateImage(provider, prompt);
     const src = url.startsWith('http') ? url : `data:image/png;base64,${url}`;
     win.write('index.html', `<body style="margin:0;background:#0a0a0a;display:grid;place-items:center;height:100vh"><img src="${src}" style="max-width:96%;max-height:96%"></body>`);
-    console.log(c.green('  ✓ image ready in the live window.\n'));
+    sp.stop(c.green(glyph.ok), c.dim('image ready in the live window'));
   } catch (e) {
-    console.log(c.red('  image failed: ') + c.dim(e.message) + '\n');
+    sp.stop(c.red(glyph.err), c.dim(e.message));
   }
 }
 
@@ -185,21 +206,23 @@ async function doSearch(arg, history) {
   const query = arg || (await prompts({ type: 'text', name: 'q', message: 'Search:' })).q;
   if (!query) return;
 
-  console.log(c.dim('\n  searching ' + (cfg.search?.id || 'none') + '…'));
+  console.log('');
+  const sp = spinner('searching ' + (cfg.search?.id || 'none') + '…');
   let results;
   try {
     results = await webSearch(cfg.search, query);
   } catch (e) {
-    console.log(c.red('\n  search failed: ') + c.dim(e.message) + '\n');
+    sp.stop(c.red(glyph.err), c.dim(e.message));
     return;
   }
-  if (!results.length) { console.log(c.dim('\n  No results.\n')); return; }
+  sp.stop(c.green(glyph.ok), c.dim(`${results.length} result${results.length === 1 ? '' : 's'} for “${query}”`));
+  if (!results.length) return;
 
   console.log('');
   results.forEach((r, i) => {
     console.log('  ' + c.gold(`${i + 1}.`) + ' ' + c.white(r.title));
-    if (r.url) console.log('     ' + c.orange(r.url));
-    if (r.snippet) console.log('     ' + c.dim(truncate(r.snippet, 160)));
+    if (r.url) console.log('      ' + c.orange(r.url));
+    if (r.snippet) console.log('      ' + c.dim(truncate(r.snippet, 160)));
     console.log('');
   });
 
