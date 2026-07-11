@@ -6,7 +6,7 @@ import { config, wallet } from './store.js';
 import { renderSplash, frameLeft } from './splash.js';
 import { spinner, glyph, centerLine, rule, termWidth } from './ui.js';
 import { boxInput } from './input.js';
-import { runSetup, SEARCH_PROVIDERS } from './setup.js';
+import { runSetup, SEARCH_PROVIDERS, chooseModel } from './setup.js';
 import { SKILLS, getSkill } from './skills/index.js';
 import { chatStream, generateImage, PRESETS } from './providers.js';
 import { STORE, priceLabel, installPlugin, loadPlugins } from './plugins.js';
@@ -176,8 +176,13 @@ async function pluginMenu() {
 async function switchModel() {
   const cfg = config.read();
   if (!cfg.provider) { console.log(c.dim('\n  Run 700 setup first.\n')); return; }
-  const { model } = await prompts({ type: 'text', name: 'model', message: 'New model id:', initial: cfg.provider.model });
-  if (model) { config.write({ provider: { ...cfg.provider, model } }); console.log(c.green(`  ✓ Model → ${model}\n`)); }
+  const model = await chooseModel(cfg.provider, cfg.provider.model);
+  if (model && model !== cfg.provider.model) {
+    config.write({ provider: { ...cfg.provider, model } });
+    console.log('\n  ' + c.green(glyph.ok + ' Model → ') + c.white(model) + '\n');
+  } else {
+    console.log(c.dim('\n  Model unchanged.\n'));
+  }
 }
 
 async function doImage(arg) {

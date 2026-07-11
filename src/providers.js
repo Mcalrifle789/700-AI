@@ -92,3 +92,17 @@ export async function generateImage(provider, prompt, { size = '1024x1024' } = {
   const json = await res.json();
   return json.data?.[0]?.url || json.data?.[0]?.b64_json;
 }
+
+// List available models from the configured provider (live API call).
+// Works for OpenAI-compatible providers (GET /models) and native Anthropic.
+export async function listModels(provider) {
+  const kind = provider.kind || 'openai';
+  const headers = kind === 'anthropic'
+    ? { 'x-api-key': provider.apiKey, 'anthropic-version': '2023-06-01' }
+    : { Authorization: `Bearer ${provider.apiKey}` };
+  const res = await fetch(`${provider.baseURL}/models`, { headers });
+  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+  const json = await res.json();
+  const data = json.data || json.models || [];
+  return data.map((m) => (typeof m === 'string' ? m : m.id || m.name)).filter(Boolean);
+}

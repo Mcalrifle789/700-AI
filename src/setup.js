@@ -2,7 +2,7 @@
 import prompts from 'prompts';
 import { c, brand } from './theme.js';
 import { config } from './store.js';
-import { PRESETS } from './providers.js';
+import { PRESETS, listModels } from './providers.js';
 
 export const SEARCH_PROVIDERS = [
   { id: 'none', title: 'None / skip', needsKey: false },
@@ -10,6 +10,31 @@ export const SEARCH_PROVIDERS = [
 ];
 
 const cancel = { onCancel: () => process.exit(0) };
+
+// Fetch the provider's live model list and let the user pick one. Falls back to
+// manual text entry if the list can't be fetched or comes back empty.
+export async function chooseModel(provider, current) {
+  process.stdout.write(c.dim('\n  fetching models from ' + (provider.label || provider.id || 'provider') + '…') + '\n');
+  let models;
+  try {
+    models = await listModels(provider);
+  } catch (e) {
+    const r = await prompts({ type: 'text', name: 'model', message: `Couldn't fetch models (${e.message}). Enter model id:`, initial: current });
+    return r.model || current;
+  }
+  if (!models.length) {
+    const r = await prompts({ type: 'text', name: 'model', message: 'No models returned. Enter model id:', initial: current });
+    return r.model || current;
+  }
+  models.sort();
+  const r = await prompts({
+    type: 'autocomplete',
+    name: 'model',
+    message: `Select a model — ${models.length} available (type to filter)`,
+    choices: models.map((m) => ({ title: m, value: m })),
+  });
+  return r.model || current;
+}
 
 export async function runSetup() {
   console.log('\n' + brand('  700 AI — Guided Setup') + '\n');
@@ -36,12 +61,10 @@ export async function runSetup() {
     message: `Paste your ${preset.label} API key:`,
   }, cancel);
 
-  const { model } = await prompts({
-    type: 'text',
-    name: 'model',
-    message: 'Model id:',
-    initial: preset.defaultModel,
-  }, cancel);
+  const model = await chooseModel(
+    { id: preset.id, label: preset.label, baseURL, kind: preset.kind, apiKey: apiKey || 'ollama' },
+    preset.defaultModel,
+  );
 
   config.write({
     provider: { id: preset.id, label: preset.label, baseURL, kind: preset.kind, apiKey: apiKey || 'ollama', model },
