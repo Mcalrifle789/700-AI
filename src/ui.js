@@ -48,6 +48,33 @@ export function boxed(contentLines, { padX = 3, color = c.box } = {}) {
   return { lines: [top, ...mids, bottom], width: inner + 2 };
 }
 
+// "Working" animation shown while waiting for a chat response — a spinner with
+// animated dots and an elapsed timer. Clears itself completely on stop() (no
+// leftover line) so the streamed reply can print in its place. Silent when
+// stdout is not a TTY, so piped/non-interactive output stays clean.
+export function workingAnimation(text = 'thinking', prefix = '') {
+  if (!process.stdout.isTTY) return { stop() {} };
+  const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+  const dots = ['   ', '.  ', '.. ', '...'];
+  const start = Date.now();
+  let i = 0;
+  const tick = () => {
+    const f = frames[i % frames.length];
+    const d = dots[Math.floor(i / 3) % dots.length];
+    const secs = ((Date.now() - start) / 1000).toFixed(1);
+    process.stdout.write('\r\x1B[K' + prefix + c.gold(f) + ' ' + c.dim(text + d) + '  ' + c.faint('(' + secs + 's)'));
+    i++;
+  };
+  tick();
+  const id = setInterval(tick, 90);
+  return {
+    stop() {
+      clearInterval(id);
+      process.stdout.write('\r\x1B[K'); // clear the line, leave cursor at col 0
+    },
+  };
+}
+
 // Braille spinner for discrete async waits. Falls back to a single line when
 // stdout is not a TTY (piped/non-interactive) so logs stay clean.
 export function spinner(text, color = c.orange) {

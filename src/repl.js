@@ -4,7 +4,7 @@ import prompts from 'prompts';
 import { c, brand } from './theme.js';
 import { config, wallet } from './store.js';
 import { renderSplash, frameLeft } from './splash.js';
-import { spinner, glyph, centerLine, rule, termWidth } from './ui.js';
+import { spinner, workingAnimation, glyph, centerLine, rule, termWidth } from './ui.js';
 import { boxInput } from './input.js';
 import { runSetup, SEARCH_PROVIDERS, chooseModel } from './setup.js';
 import { SKILLS, getSkill } from './skills/index.js';
@@ -113,19 +113,30 @@ async function streamChat(messages, history, userText, modelOverride) {
   }
   const provider = modelOverride ? { ...cfg.provider, model: modelOverride } : cfg.provider;
   const pad = ' '.repeat(frameLeft() + 1);
-  process.stdout.write('\n' + pad + c.gold(glyph.spark + ' 700') + c.dim('  ' + glyph.dot + '  ' + provider.model) + '\n' + pad + c.faint('│') + '\n');
+  process.stdout.write('\n');
+
+  // Show a "working" animation until the first token streams back.
+  const working = workingAnimation('700 is thinking', pad);
   const write = gutterWriter(pad + c.faint('│ '));
   let full = '';
+  let started = false;
   try {
     const controller = new AbortController();
     for await (const delta of chatStream(provider, messages, { signal: controller.signal })) {
+      if (!started) {
+        started = true;
+        working.stop();
+        process.stdout.write(pad + c.gold(glyph.spark + ' 700') + c.dim('  ' + glyph.dot + '  ' + provider.model) + '\n' + pad + c.faint('│') + '\n');
+      }
       write(delta);
       full += delta;
     }
   } catch (e) {
-    console.log('\n' + pad + c.red(glyph.err + ' request failed: ') + c.dim(e.message));
+    working.stop();
+    console.log(pad + c.red(glyph.err + ' request failed: ') + c.dim(e.message));
     return;
   }
+  working.stop();
   process.stdout.write('\n');
   history.push({ role: 'user', content: userText }, { role: 'assistant', content: full });
 }
