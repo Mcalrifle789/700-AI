@@ -14,7 +14,7 @@ const clearDown = ESC + '0J';
 
 let _fallbackRl = null;
 
-export function boxInput({ input = process.stdin, output = process.stdout, indent = 2, width } = {}) {
+export function boxInput({ input = process.stdin, output = process.stdout, indent = 2, width, placeholder = '' } = {}) {
   const cols = output.columns || 100;
   const w = Math.max(24, width || cols - indent * 2);
 
@@ -45,11 +45,19 @@ export function boxInput({ input = process.stdin, output = process.stdout, inden
 
     function frame() {
       const start = pos > avail ? pos - avail : 0;
-      const visible = buf.slice(start, start + avail);
-      const used = 1 + label.length + visible.length;
+      let shownRaw;
+      let shownColored;
+      if (buf.length === 0 && placeholder) {
+        shownRaw = placeholder.slice(0, avail);
+        shownColored = c.faint(shownRaw);
+      } else {
+        shownRaw = buf.slice(start, start + avail);
+        shownColored = c.white(shownRaw);
+      }
+      const used = 1 + label.length + shownRaw.length;
       const trail = ' '.repeat(Math.max(0, innerW - used));
       const top = pad + c.red('╭') + c.dim('─'.repeat(innerW) + '╮');
-      const mid = pad + c.red('│') + ' ' + c.orange(label) + c.white(visible) + trail + c.dim('│');
+      const mid = pad + c.red('│') + ' ' + c.orange(label) + shownColored + trail + c.dim('│');
       const bot = pad + c.red('╰') + c.dim('─'.repeat(innerW) + '╯');
       const curCol = indent + 1 + 1 + label.length + (pos - start);
       return { top, mid, bot, curCol };

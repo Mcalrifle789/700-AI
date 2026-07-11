@@ -119,94 +119,40 @@ function stampWordmark(s, x0, y0) {
   return width;
 }
 
-function stampCard(s, x, y, w, cfg) {
-  const model = cfg.provider?.model || 'Claude Opus 4.8';
-  const providerLabel = cfg.provider?.label || '700 AI Terminal';
-  const tier = cfg.provider ? 'ready' : 'max';
-  const red = '#e74c3c';
-  const dim = '#6b6b6b';
-  const faint = '#4a4a4a';
-  const gold = '#f1c40f';
-  const white = '#e8e6e3';
-
-  const rightX = x + w - 1;
-  // Clear the card interior so the wallpaper doesn't bleed through.
-  for (let r = 0; r <= 4; r++) for (let cx = x; cx <= rightX; cx++) s.set(cx, y + r, ' ', null);
-
-  // Borders — bright red on the left edge, dim elsewhere (matches the mockup).
-  for (let cx = x + 1; cx < rightX; cx++) { s.set(cx, y, '─', faint); s.set(cx, y + 4, '─', faint); }
-  for (let r = 1; r < 4; r++) s.set(rightX, y + r, '│', faint);
-  s.set(x, y, '╭', red); s.set(x, y + 4, '╰', red);
-  for (let r = 1; r < 4; r++) s.set(x, y + r, '│', red);
-  s.set(rightX, y, '╮', faint); s.set(rightX, y + 4, '╯', faint);
-
-  // Content.
-  let cx = x + 3;
-  s.text(cx, y + 1, 'Ask anything...', dim);
-  s.text(cx + 16, y + 1, '"Fix a TODO in the codebase"', faint);
-
-  cx = x + 3;
-  s.text(cx, y + 3, 'Build', red); cx += 6;
-  s.text(cx, y + 3, '·', dim); cx += 2;
-  s.text(cx, y + 3, model, white); cx += model.length + 2;
-  s.text(cx, y + 3, providerLabel, dim); cx += providerLabel.length + 2;
-  s.text(cx, y + 3, '·', dim); cx += 2;
-  s.text(cx, y + 3, tier, gold);
-}
-
 function clearRow(s, x, y, len) { for (let i = 0; i < len; i++) s.set(x + i, y, ' ', null); }
 function seg(s, x, y, str, fg) { s.text(x, y, str, fg); return x + [...str].length; }
 
+// A compact hero band: ember/nebula wallpaper behind the glowing wordmark plus
+// a status line. No input card — the REPL renders the single, real input box
+// (the "Ask anything…" box) directly below this.
 export function buildScene(cfg) {
   const cols = process.stdout.columns || 100;
-  const rows = process.stdout.rows || 32;
   const W = Math.max(64, Math.min(cols, 160));
-  const H = Math.max(26, Math.min(rows - 1, 44));
+  const marginX = Math.max(3, Math.round(W * 0.05));
+  const H = WORDMARK.length + 6; // top pad + wordmark + tagline + status + pad
 
   const s = new Screen(W, H);
   paintBackground(s);
-
-  const marginX = Math.max(3, Math.round(W * 0.05));
-  const wmY = Math.max(1, Math.round(H * 0.12));
-  stampWordmark(s, marginX + 1, wmY);
-
-  const cardX = marginX;
-  const cardW = W - marginX * 2;
-  const cardY = Math.round(H * 0.52);
-  stampCard(s, cardX, cardY, cardW, cfg);
-  _frameLeft = cardX;
+  stampWordmark(s, marginX + 1, 2);
+  _frameLeft = marginX;
 
   const white = '#e8e6e3';
   const dim = '#6b6b6b';
-  const orange = '#e67e22';
   const gold = '#f1c40f';
 
-  // Hints under the card, right-aligned (clear the strip first).
-  const hintY = cardY + 6;
-  const hint = 'tab agents   ctrl+p commands';
-  let hx = cardX + cardW - hint.length;
-  clearRow(s, hx, hintY, hint.length);
-  hx = seg(s, hx, hintY, 'tab ', white);
-  hx = seg(s, hx, hintY, 'agents   ', dim);
-  hx = seg(s, hx, hintY, 'ctrl+p ', white);
-  hx = seg(s, hx, hintY, 'commands', dim);
+  const tagY = 2 + WORDMARK.length + 1;
+  clearRow(s, marginX + 1, tagY, W - marginX * 2 - 2);
+  seg(s, marginX + 1, tagY, 'Your terminal.   Any model.   Your keys.', dim);
 
-  // Tip line.
-  const tipY = Math.min(H - 3, cardY + 9);
-  const tipFull = '● Tip Use /skills to list all commands · type on the 700 ❯ line below';
-  let tx = marginX + 2;
-  clearRow(s, tx, tipY, [...tipFull].length);
-  tx = seg(s, tx, tipY, '● ', gold);
-  tx = seg(s, tx, tipY, 'Tip ', orange);
-  tx = seg(s, tx, tipY, 'Use ', dim);
-  tx = seg(s, tx, tipY, '/skills', white);
-  tx = seg(s, tx, tipY, ' to list all commands · type on the ', dim);
-  tx = seg(s, tx, tipY, '700 ❯', orange);
-  tx = seg(s, tx, tipY, ' line below', dim);
-
-  // Footer corners.
-  s.text(2, H - 1, '~', dim);
-  s.text(W - 1 - VERSION.length, H - 1, VERSION, dim);
+  const statY = tagY + 1;
+  clearRow(s, marginX + 1, statY, W - marginX * 2 - 2);
+  const model = cfg.provider?.model || 'not configured';
+  const providerLabel = cfg.provider?.label || '700 AI Terminal';
+  let sx = marginX + 1;
+  sx = seg(s, sx, statY, providerLabel + '   ', white);
+  sx = seg(s, sx, statY, '· ', dim);
+  sx = seg(s, sx, statY, model + '   ', cfg.provider ? gold : dim);
+  sx = seg(s, sx, statY, '· v' + VERSION, dim);
 
   return s.render();
 }

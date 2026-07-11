@@ -16,6 +16,9 @@ export function renderSplash() {
     const scene = buildScene(cfg);
     _frameLeft = sceneFrameLeft();
     process.stdout.write('\n' + scene + '\n');
+    process.stdout.write(centerLine(
+      c.dim('Type in the box below   ' + glyph.dot + '   ') + c.white('/skills') + c.dim(' commands   ' + glyph.dot + '   ')
+      + c.white('/setup') + c.dim(' configure   ' + glyph.dot + '   ') + c.white('/exit') + c.dim(' quit')) + '\n');
   } catch {
     renderFallback(cfg);
   }

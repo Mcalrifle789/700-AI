@@ -24,7 +24,7 @@ export async function startRepl() {
 
   const history = [];
   for (;;) {
-    const raw = await boxInput({ indent: frameLeft() });
+    const raw = await boxInput({ indent: frameLeft(), placeholder: 'Ask anything...' });
     const line = (raw || '').trim();
     if (!line) continue;
 
