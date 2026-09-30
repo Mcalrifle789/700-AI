@@ -7,6 +7,7 @@
 import prompts from 'prompts';
 import { c, brand } from './theme.js';
 import { wallet } from './store.js';
+import { maskedInput } from './setup.js';
 
 async function stripeBalance(key) {
   const res = await fetch('https://api.stripe.com/v1/balance', {
@@ -61,7 +62,8 @@ export async function openWallet() {
   }, { onCancel: () => ({ action: 'close' }) });
 
   if (action === 'stripe') {
-    const { key } = await prompts({ type: 'password', name: 'key', message: 'Stripe secret key (sk_live_...):' });
+    const entered = await maskedInput('Stripe secret key (sk_live_...):');
+    const key = (entered || '').trim();
     if (key) { wallet.write({ stripeKey: key }); console.log(c.green('  ✓ Stripe connected.\n')); }
   } else if (action === 'payout') {
     console.log(c.dim('\n  Payouts to your bank are handled by Stripe: ') + c.white('https://dashboard.stripe.com/payouts') + '\n');

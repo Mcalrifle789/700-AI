@@ -17,4 +17,4 @@ export const c = {
   box: chalk.hex('#8a2b1a'),
 };
 
-export const VERSION = '1.17.8';
+export const VERSION = '2.0.0';

@@ -31,6 +31,8 @@ const defaultConfig = {
   provider: null,        // { id, label, baseURL, apiKey, model }
   imageModel: null,      // { provider, model }
   search: null,          // { id, apiKey }
+  music: null,           // { provider, spotify:{...}, apple:{...} }
+  routing: null,         // { enabled, small } — speculative routing (spec 2.2)
   onboarded: false,
 };
 

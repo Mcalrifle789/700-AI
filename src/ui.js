@@ -16,6 +16,16 @@ export const glyph = {
 // Actual terminal width (min 40), used for centering.
 export const termWidth = () => Math.max(40, process.stdout.columns || 80);
 
+// Invoke `fn` (with { width, height }) whenever the terminal window is resized.
+// Uses the stdout TTY 'resize' event; no-ops (and returns a dummy unsubscribe)
+// when stdout is not a TTY, so piped/scripted runs stay silent.
+export function onResize(fn) {
+  if (!process.stdout.isTTY) return () => {};
+  const handler = () => fn({ width: process.stdout.columns, height: process.stdout.rows });
+  process.stdout.on('resize', handler);
+  return () => process.stdout.off('resize', handler);
+}
+
 // Set the terminal window/tab title (OSC 0). No-op when not a TTY.
 export function setTerminalTitle(title) {
   if (process.stdout.isTTY) process.stdout.write('\x1B]0;' + title + '\x07');

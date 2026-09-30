@@ -5,13 +5,28 @@
 import chalk from 'chalk';
 import { VERSION } from './theme.js';
 
+// Engraved-serif wordmark. Rasterized from the installed Engravers (engravrl.ttf)
+// font and shaded into terminal cells (░▒▓█), so the letterforms match the real
+// Engravers logo as closely as a text terminal allows. Regenerate via
+// scripts/gen-wordmark.py if you want a different size/font.
 const WORDMARK = [
-  ' ███████╗  ██████╗   ██████╗      █████╗  ██╗',
-  ' ╚════██║ ██╔═══██╗ ██╔═══██╗    ██╔══██╗ ██║',
-  '     ██╔╝ ██║   ██║ ██║   ██║    ███████║ ██║',
-  '    ██╔╝  ██║   ██║ ██║   ██║    ██╔══██║ ██║',
-  '    ██║   ╚██████╔╝ ╚██████╔╝    ██║  ██║ ██║',
-  '    ╚═╝    ╚═════╝   ╚═════╝     ╚═╝  ╚═╝ ╚═╝',
+  '█▓█▓▓█▓▓▒    ▒▓▓▓▒      ▒▓▓▓▒              ░▓▓       ▓▒',
+  '▒▒▒▒▒▒▓█░  ░█▓▒░▒█▓   ░█▓▒░▒█▓             ▓██░      █▓',
+  '      █▒   █▓     █▓  █▓     █▓           ░█░█▓      █▓',
+  '     ▓▓   ░█░     ▒█ ░█      ▒█           █▓ ░█░     █▓',
+  '    ▒█░   ░█░     ░█ ▒█      ▒█          ▒█░░ ▓█     █▓',
+  '    █▒     █▒     ▓█ ░█▒     ▓█          ███████▒    █▓',
+  '   ▓▓      ▒█▒   ▒█░  ▒█▒  ░▓█░         ▒█     ▒█    █▓',
+  '  ▒█░       ░▓█▓█▓░    ░▓█▓█▓░          █▒      █▓   █▓',
+];
+
+// Star accents scattered around the wordmark [row, col, char], relative to the
+// wordmark's top-left. Negative/overflowing coords sit just outside the letters.
+const STAR_COLORS = ['#fff2c0', '#ffe07a', '#f1c40f'];
+const STARS = [
+  [-1, 3, '✧'], [-1, 27, '⋆'], [-1, 50, '✦'],
+  [0, -2, '✦'], [3, 37, '✦'], [5, 34, '✧'],
+  [6, -3, '⋆'], [7, 53, '✦'], [1, 54, '·'],
 ];
 
 // Color ramps.
@@ -97,13 +112,19 @@ function paintBackground(s) {
       s.set(x, y, ch, color);
 
       // Occasional bright spark for the galaxy shimmer.
-      if (hash(x + 101, y + 53) > 0.992) s.set(x, y, '✦', '#fff2c0');
+      if (hash(x + 101, y + 53) > 0.986) s.set(x, y, '✦', '#fff2c0');
+      else if (hash(x + 211, y + 97) > 0.99) s.set(x, y, '✧', '#e9ea86');
     }
   }
 }
 
 function stampWordmark(s, x0, y0) {
   const width = Math.max(...WORDMARK.map((l) => l.length));
+  // Clear a clean plaque behind the wordmark so the thin engraved serifs read
+  // against black instead of the ember/nebula shimmer bleeding through them.
+  const padX = 2, padY = 1;
+  for (let y = -padY; y < WORDMARK.length + padY; y++)
+    for (let x = -padX; x < width + padX; x++) s.set(x0 + x, y0 + y, ' ', null);
   for (let row = 0; row < WORDMARK.length; row++) {
     const line = WORDMARK[row];
     for (let col = 0; col < line.length; col++) {
@@ -116,39 +137,57 @@ function stampWordmark(s, x0, y0) {
       s.set(x0 + col, y0 + row, ch, fg);
     }
   }
+  // Scatter bright star accents around the wordmark for extra detail.
+  for (const [row, col, ch] of STARS) {
+    const color = STAR_COLORS[Math.abs(row * 7 + col) % STAR_COLORS.length];
+    s.set(x0 + col, y0 + row, ch, color);
+  }
   return width;
 }
 
 function clearRow(s, x, y, len) { for (let i = 0; i < len; i++) s.set(x + i, y, ' ', null); }
 function seg(s, x, y, str, fg) { s.text(x, y, str, fg); return x + [...str].length; }
 
-// A compact hero band: ember/nebula wallpaper behind the glowing wordmark plus
-// a status line. No input card — the REPL renders the single, real input box
-// (the "Ask anything…" box) directly below this.
+// A full-screen hero: ember/nebula wallpaper filling the whole terminal, with
+// the glowing wordmark centered and a status line below it. No input card — the
+// REPL renders the single, real input box (the "Ask anything…" box) underneath.
 export function buildScene(cfg) {
   const cols = process.stdout.columns || 100;
-  const W = Math.max(64, Math.min(cols, 160));
+  const rows = process.stdout.rows || 30;
+  const W = Math.max(64, cols);                  // fill the full terminal width
   const marginX = Math.max(3, Math.round(W * 0.05));
-  const H = WORDMARK.length + 6; // top pad + wordmark + tagline + status + pad
+
+  const wmWidth = Math.max(...WORDMARK.map((l) => l.length));
+  // Fill (nearly) the whole terminal height; leave room for the hint line and
+  // the input box the REPL draws directly below the scene.
+  const minH = WORDMARK.length + 6;
+  const H = Math.max(minH, rows - 6);
 
   const s = new Screen(W, H);
   paintBackground(s);
-  stampWordmark(s, marginX + 1, 2);
+
+  // Center the wordmark horizontally and sit it a little above the middle.
+  const x0 = Math.max(1, Math.floor((W - wmWidth) / 2));
+  const y0 = Math.max(2, Math.floor(H * 0.42) - Math.floor(WORDMARK.length / 2));
+  stampWordmark(s, x0, y0);
   _frameLeft = marginX;
 
   const white = '#e8e6e3';
   const dim = '#6b6b6b';
   const gold = '#f1c40f';
+  const center = (str) => Math.max(0, Math.floor((W - str.length) / 2));
 
-  const tagY = 2 + WORDMARK.length + 1;
-  clearRow(s, marginX + 1, tagY, W - marginX * 2 - 2);
-  seg(s, marginX + 1, tagY, 'Your terminal.   Any model.   Your keys.', dim);
+  const tag = 'Your terminal.   Any model.   Your keys.';
+  const tagY = y0 + WORDMARK.length + 1;
+  clearRow(s, 0, tagY, W);
+  seg(s, center(tag), tagY, tag, dim);
 
-  const statY = tagY + 1;
-  clearRow(s, marginX + 1, statY, W - marginX * 2 - 2);
   const model = cfg.provider?.model || 'not configured';
   const providerLabel = cfg.provider?.label || '700 AI Terminal';
-  let sx = marginX + 1;
+  const statStr = providerLabel + '   · ' + model + '   · v' + VERSION;
+  const statY = tagY + 1;
+  clearRow(s, 0, statY, W);
+  let sx = center(statStr);
   sx = seg(s, sx, statY, providerLabel + '   ', white);
   sx = seg(s, sx, statY, '· ', dim);
   sx = seg(s, sx, statY, model + '   ', cfg.provider ? gold : dim);

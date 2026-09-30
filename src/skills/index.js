@@ -1,4 +1,4 @@
-// 700 AI ships with 34 built-in skills/commands.
+// 700 AI ships with 40+ built-in skills/commands.
 // `kind: 'prompt'` skills steer the model; `kind: 'action'` skills run local code.
 // Extra skills can be added by plugins via the plugin loader.
 export const SKILLS = [
@@ -13,6 +13,22 @@ export const SKILLS = [
   { name: 'sessions', kind: 'action', group: 'core', desc: 'List, pin, and continue past sessions' },
   { name: 'image', kind: 'action', group: 'create', desc: 'Generate an image from a prompt' },
   { name: 'build', kind: 'action', group: 'create', desc: 'Build an app/site with a live visual work window' },
+  { name: 'stage', kind: 'action', group: 'create', desc: 'Stage a file (audio/video/doc/code) as multimodal context' },
+  { name: 'staged', kind: 'action', group: 'create', desc: 'List files staged into the session' },
+  { name: 'unstage', kind: 'action', group: 'create', desc: 'Remove a staged file (index, name, or all)' },
+  { name: 'deploy', kind: 'action', group: 'core', desc: 'Commit & push the workspace to GitHub (classic token)' },
+  { name: 'route', kind: 'action', group: 'core', desc: 'Configure speculative routing (fast model for simple asks)' },
+  { name: 'states', kind: 'action', group: 'core', desc: 'Preview the five agent-state animations' },
+
+  // ── Music ───────────────────────────────────────────────────
+  { name: 'music', kind: 'action', group: 'music', desc: 'Connect Spotify or Apple Music' },
+  { name: 'play', kind: 'action', group: 'music', desc: 'Play a song or playlist' },
+  { name: 'playlists', kind: 'action', group: 'music', desc: 'List and switch playlists' },
+  { name: 'pause', kind: 'action', group: 'music', desc: 'Pause playback' },
+  { name: 'next', kind: 'action', group: 'music', desc: 'Skip to the next track' },
+  { name: 'prev', kind: 'action', group: 'music', desc: 'Back to the previous track' },
+  { name: 'nowplaying', kind: 'action', group: 'music', desc: 'Show what is playing now' },
+
   { name: 'clear', kind: 'action', group: 'core', desc: 'Clear the conversation' },
   { name: 'help', kind: 'action', group: 'core', desc: 'Show help' },
   { name: 'exit', kind: 'action', group: 'core', desc: 'Quit 700 AI' },

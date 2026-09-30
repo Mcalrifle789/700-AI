@@ -2,3 +2,8 @@ node_modules/
 npm-debug.log*
 .DS_Store
 .700ai/
+
+# Local-only files — never publish these
+*.docx
+*.prev.png
+test/

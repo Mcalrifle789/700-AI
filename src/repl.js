@@ -1,19 +1,27 @@
 // The 700 AI interactive terminal loop.
 import readline from 'readline';
 import prompts from 'prompts';
-import { c, brand } from './theme.js';
+import { c, brand, ember } from './theme.js';
 import { config, wallet } from './store.js';
 import { renderSplash, frameLeft } from './splash.js';
-import { spinner, workingAnimation, glyph, centerLine, rule, termWidth, setTerminalTitle, enterFullscreen, leaveFullscreen } from './ui.js';
-import { boxInput } from './input.js';
-import { runSetup, SEARCH_PROVIDERS, chooseModel } from './setup.js';
+import { spinner, glyph, centerLine, rule, termWidth, setTerminalTitle, enterFullscreen, leaveFullscreen, onResize } from './ui.js';
+import { boxInput, requestRefresh, inputActive } from './input.js';
+import { runSetup, SEARCH_PROVIDERS, chooseModel, maskedInput } from './setup.js';
 import { SKILLS, getSkill } from './skills/index.js';
-import { chatStream, generateImage, PRESETS } from './providers.js';
+import { chatStream, generateImage, PRESETS, requiresKey } from './providers.js';
 import { STORE, priceLabel, installPlugin, loadPlugins } from './plugins.js';
 import { openWallet } from './wallet.js';
 import { manageAgents, findAgent } from './agents.js';
 import { startPreview } from './build/preview.js';
 import { webSearch } from './search.js';
+import { connectMusic, doPlay, doPlaylists, doPause, doNext, doPrev, doNowPlaying } from './music/index.js';
+import { stageFile, metaSummary, stagedContext } from './pipeline/intake.js';
+import { humanBytes } from './pipeline/limits.js';
+import { classify, diagnostic, renderDiagnostic, reportFor } from './pipeline/diagnostics.js';
+import { stateAnimation, STATE_NAMES } from './animations.js';
+import { createRenderer } from './format.js';
+import { route, withScaffold } from './reason.js';
+import { runDeploy } from './deploy.js';
 
 export async function startRepl() {
   // Name the terminal tab and take over the full screen (restored on exit).
@@ -25,13 +33,39 @@ export async function startRepl() {
 
   renderSplash();
 
+  // Terminal resize (minimize/maximize/drag): re-fit the whole app — redraw
+  // the splash scene for the new size, then have the active input widget
+  // (box or palette) redraw fresh beneath it. Skipped while output is
+  // streaming or a command runs, so live output isn't wiped mid-flight.
+  let resizeTimer = null;
+  onResize(() => {
+    if (!inputActive()) return;
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      if (!inputActive()) return; // widget closed while we waited
+      console.clear();
+      renderSplash();
+      requestRefresh();
+    }, 120);
+  });
+
+  // Provider sanity check: a hosted provider with no real key stored (e.g. the
+  // legacy 'ollama' placeholder) can never authenticate — say so up front.
+  const cfg0 = config.read();
+  if (cfg0.provider && requiresKey(cfg0.provider) && (!cfg0.provider.apiKey || cfg0.provider.apiKey === 'ollama')) {
+    console.log(c.gold('\n  ⚠ ' + cfg0.provider.label + ' has no API key stored — chat requests will fail auth.')
+      + c.dim('  Run ') + c.white('/setup') + c.dim(' to enter it (masked, verified live).\n'));
+  }
+
   const ctx = { config, wallet, say: (s) => console.log(s) };
   const pluginSkills = await loadPlugins(ctx);
   const allSkills = [...SKILLS, ...pluginSkills];
 
   const history = [];
+  const staged = [];   // multimodal assets staged via /stage, injected as context
   for (;;) {
-    const raw = await boxInput({ indent: frameLeft(), placeholder: 'Ask anything...' });
+    const raw = await boxInput({ indent: frameLeft(), placeholder: staged.length ? `${staged.length} file(s) staged · ask anything…` : 'Ask anything…', commands: allSkills });
+    if (raw === null) break;  // EOF on piped/scripted stdin — exit cleanly
     const line = (raw || '').trim();
     if (!line) continue;
 
@@ -40,7 +74,7 @@ export async function startRepl() {
     if (isCmd) {
       const [name, ...rest] = line.replace(/^\//, '').split(' ');
       const arg = rest.join(' ');
-      const done = await runCommand(name.toLowerCase(), arg, { history, allSkills });
+      const done = await runCommand(name.toLowerCase(), arg, { history, allSkills, staged });
       if (done === 'exit') break;
       continue;
     }
@@ -48,13 +82,26 @@ export async function startRepl() {
     // @agent routing
     const routed = findAgent(line);
     if (routed) {
-      await streamChat([{ role: 'system', content: routed.agent.system }, ...history, { role: 'user', content: routed.message }], history, routed.message, routed.agent.model);
+      echoUser(line);
+      const msgs = injectStaged([{ role: 'system', content: routed.agent.system }, ...history, { role: 'user', content: routed.message }], staged);
+      await streamChat(msgs, history, routed.message, { model: routed.agent.model });
       continue;
     }
 
-    // plain conversation
-    await streamChat([...history, { role: 'user', content: line }], history, line);
+    // plain conversation — speculative routing + CoT scaffolding (spec 2.2)
+    echoUser(line);
+    const cfg = config.read();
+    const r = route(line, cfg, { staged: staged.length });
+    let msgs = injectStaged([...history, { role: 'user', content: line }], staged);
+    msgs = withScaffold(msgs, { cot: r.cot });
+    await streamChat(msgs, history, line, { model: r.model, tier: r.tier, complexity: r.complexity });
   }
+}
+
+// Prepend the staged multimodal context block as a system message, if any.
+function injectStaged(messages, staged) {
+  const ctx = stagedContext(staged);
+  return ctx ? [{ role: 'system', content: ctx }, ...messages] : messages;
 }
 
 function getCommand(line) {
@@ -62,7 +109,7 @@ function getCommand(line) {
   return getSkill(first);
 }
 
-async function runCommand(name, arg, { history, allSkills }) {
+async function runCommand(name, arg, { history, allSkills, staged }) {
   switch (name) {
     case 'setup': await runSetup(); return;
     case 'wallet': await openWallet(); return;
@@ -75,6 +122,19 @@ async function runCommand(name, arg, { history, allSkills }) {
     case 'image': await doImage(arg); return;
     case 'build': await doBuild(arg, history); return;
     case 'search': await doSearch(arg, history); return;
+    case 'stage': case 'attach': await doStage(arg, staged); return;
+    case 'staged': case 'attachments': showStaged(staged); return;
+    case 'unstage': doUnstage(arg, staged); return;
+    case 'deploy': case 'push': await runDeploy(arg); return;
+    case 'route': await configureRoute(); return;
+    case 'states': await demoStates(); return;
+    case 'music': await connectMusic(); return;
+    case 'play': await doPlay(arg); return;
+    case 'playlists': await doPlaylists(); return;
+    case 'pause': await doPause(); return;
+    case 'next': case 'skip': await doNext(); return;
+    case 'prev': case 'previous': await doPrev(); return;
+    case 'nowplaying': await doNowPlaying(); return;
     case 'voice': {
       const vs = allSkills.find((s) => s.name === 'voice' && s.plugin);
       if (vs?.run) { await vs.run(arg); return; }
@@ -96,72 +156,129 @@ async function runCommand(name, arg, { history, allSkills }) {
   }
 }
 
-// Writes streamed text with a soft left gutter bar on every line.
-function gutterWriter(prefix) {
+// Echoes the message the user just sent as a clean "you" block. The input box
+// erases itself on submit, so this is what keeps the conversation readable:
+// one tidy user block, then the assistant reply — no stacked, half-filled boxes.
+function echoUser(text) {
+  const pad = ' '.repeat(frameLeft() + 1);
+  process.stdout.write('\n' + pad + c.orange(glyph.prompt + ' you') + '\n' + pad + c.orange('│') + '\n');
+  const write = gutterWriter(pad + c.orange('│ '));
+  write(text);
+  process.stdout.write('\n');
+}
+
+// Writes streamed text with a soft left gutter bar on every line, in the given
+// color (defaults to white for answers; dim is used for a model's reasoning).
+function gutterWriter(prefix, color = c.white) {
   let atStart = true;
   return (chunk) => {
     let i = 0;
     while (i < chunk.length) {
       if (atStart) { process.stdout.write(prefix); atStart = false; }
       const nl = chunk.indexOf('\n', i);
-      if (nl === -1) { process.stdout.write(c.white(chunk.slice(i))); break; }
-      process.stdout.write(c.white(chunk.slice(i, nl)) + '\n');
+      if (nl === -1) { process.stdout.write(color(chunk.slice(i))); break; }
+      process.stdout.write(color(chunk.slice(i, nl)) + '\n');
       atStart = true;
       i = nl + 1;
     }
   };
 }
 
-async function streamChat(messages, history, userText, modelOverride) {
+async function streamChat(messages, history, userText, opts = {}) {
   const cfg = config.read();
   if (!cfg.provider) {
-    console.log('\n  ' + c.orange(glyph.warn + ' No provider configured.') + c.dim(' Run ') + c.white('700 setup') + c.dim(' first.\n'));
+    console.log('\n' + renderDiagnostic(diagnostic('NO_PROVIDER')) + '\n');
     return;
   }
-  const provider = modelOverride ? { ...cfg.provider, model: modelOverride } : cfg.provider;
+  const model = opts.model || cfg.provider.model;
+  const provider = { ...cfg.provider, model };
   const pad = ' '.repeat(frameLeft() + 1);
+  const gutter = pad + c.faint('│ ');
   process.stdout.write('\n');
 
-  // Show a "working" animation until the first token streams back.
-  const working = workingAnimation('700 is thinking', pad);
-  const write = gutterWriter(pad + c.faint('│ '));
+  // Rich typography (spec 2.5): stream content through the layout node so
+  // headers, code, callouts and emphasis render. Line-buffered — emits styled
+  // lines as newlines arrive.
+  const renderer = createRenderer({ emitLine: (l) => process.stdout.write(gutter + l + '\n'), width: Math.max(40, termWidth() - frameLeft() - 4) });
+  const writeThinking = gutterWriter(gutter, c.dim);
+
   let full = '';
   let started = false;
-  try {
-    const controller = new AbortController();
-    for await (const delta of chatStream(provider, messages, { signal: controller.signal })) {
-      if (!started) {
-        started = true;
-        working.stop();
-        process.stdout.write(pad + c.gold(glyph.spark + ' 700') + c.dim('  ' + glyph.dot + '  ' + provider.model) + '\n' + pad + c.faint('│') + '\n');
+  let phase = null; // 'reasoning' | 'content'
+
+  // Connection with retry + exponential backoff (spec 2.4). We only retry while
+  // nothing has streamed yet; once tokens arrive a failure is surfaced as-is.
+  const anim = stateAnimation('connecting', { label: 'connecting' });
+  for (let attempt = 0; ; attempt++) {
+    try {
+      for await (const ev of chatStream(provider, messages, {})) {
+        if (!started) { started = true; anim.stop(); }
+        if (ev.type === 'reasoning') {
+          if (phase !== 'reasoning') { phase = 'reasoning'; process.stdout.write(pad + c.dim(glyph.dot + ' thinking…') + '\n' + pad + c.faint('│') + '\n'); }
+          writeThinking(ev.text);
+        } else {
+          if (phase !== 'content') {
+            if (phase === 'reasoning') process.stdout.write('\n\n');
+            phase = 'content';
+            const tier = opts.tier === 'small' ? c.dim('  ' + glyph.dot + '  fast route') : '';
+            process.stdout.write(pad + c.gold(glyph.spark + ' 700') + c.dim('  ' + glyph.dot + '  ' + model) + tier + '\n' + pad + c.faint('│') + '\n');
+          }
+          renderer.push(ev.text);
+          full += ev.text;
+        }
       }
-      write(delta);
-      full += delta;
+      break; // stream completed
+    } catch (e) {
+      const cls = classify(e);
+      if (!started && cls?.code === 'NETWORK' && attempt < 3) {
+        anim.to('connecting', `reconnecting (try ${attempt + 2}/4)…`);
+        await new Promise((r) => setTimeout(r, 400 * Math.pow(2, attempt)));
+        continue;
+      }
+      if (!started) anim.stop();
+      const report = cls ? diagnostic(cls.code, { ...cls.ctx, baseURL: provider.baseURL }) : reportFor(e, { module: 'Provider.Transport' });
+      console.log((started ? '\n' : '') + renderDiagnostic(report) + '\n');
+      return;
     }
-  } catch (e) {
-    working.stop();
-    console.log(pad + c.red(glyph.err + ' request failed: ') + c.dim(e.message));
-    return;
   }
-  working.stop();
+  if (!started) anim.stop();
+  if (phase === 'content') renderer.end();
   process.stdout.write('\n');
   history.push({ role: 'user', content: userText }, { role: 'assistant', content: full });
 }
 
+const GROUP_STYLE = {
+  core: { color: c.gold, dot: '●', label: 'Core' },
+  create: { color: c.orange, dot: '◆', label: 'Create' },
+  music: { color: c.green, dot: '♪', label: 'Music' },
+  code: { color: c.red, dot: '▸', label: 'Code' },
+  write: { color: c.green, dot: '✎', label: 'Write' },
+  know: { color: c.gold, dot: '✦', label: 'Knowledge' },
+  plugin: { color: c.orange, dot: '⊕', label: 'Plugins' },
+};
+
 function printSkills(allSkills) {
   const W = termWidth();
-  console.log('\n' + centerLine(brand('700 AI') + c.dim('   ' + glyph.dot + '   ' + allSkills.length + ' commands'), W) + '\n');
+  const rule = ember('─'.repeat(Math.min(Math.max(20, W - 4), 60)));
+  console.log('');
+  console.log('  ' + rule);
+  console.log('  ' + c.gold(glyph.spark + ' ') + brand('700 AI')
+    + c.dim('   ' + allSkills.length + ' commands')
+    + c.faint('   ' + glyph.dot + '   type ') + c.white('/') + c.faint(' in the box for the palette'));
+  console.log('  ' + rule + '\n');
+
   const groups = {};
   for (const s of allSkills) (groups[s.group || 'plugin'] ||= []).push(s);
-  const order = ['core', 'create', 'code', 'write', 'know', 'plugin'];
-  const label = { core: 'Core', create: 'Create', code: 'Code', write: 'Write', know: 'Knowledge', plugin: 'Plugins' };
+  const order = ['core', 'create', 'music', 'code', 'write', 'know', 'plugin'];
+  const nameW = Math.max(...allSkills.map((s) => s.name.length)) + 3;
   for (const g of order) {
     const list = groups[g];
     if (!list) continue;
-    console.log('  ' + c.orange(glyph.bar) + ' ' + c.orange(label[g] || g));
+    const st = GROUP_STYLE[g] || { color: c.dim, dot: '·', label: g };
+    console.log('  ' + st.color(st.dot + '  ' + st.label.toUpperCase()));
     for (const s of list) {
-      const tag = s.plugin ? c.gold('  ' + glyph.spark) : '';
-      console.log('    ' + c.gold(glyph.prompt) + ' ' + c.white(('/' + s.name).padEnd(13)) + c.dim(s.desc) + tag);
+      const tag = s.plugin ? c.gold(' ' + glyph.spark) : '';
+      console.log('     ' + st.color(('/' + s.name).padEnd(nameW)) + c.dim(s.desc) + tag);
     }
     console.log('');
   }
@@ -182,8 +299,8 @@ async function pluginMenu() {
   let key = null;
   if (item.price > 0) {
     console.log(c.dim(`\n  Checkout: `) + c.white(`https://700-ai.dev/buy/${id}`) + c.dim(`  ($${item.price.toFixed(2)}${item.taxed ? ' + tax' : ''})`));
-    const r = await prompts({ type: 'text', name: 'k', message: 'Paste your license key from checkout:' });
-    key = r.k;
+    const entered = await maskedInput('Paste your license key from checkout:');
+    key = (entered || '').trim() || null;
     if (!key) { console.log(c.dim('  Cancelled.\n')); return; }
     wallet.record({ item: item.name, amount: item.price });
   }
@@ -277,9 +394,9 @@ async function doBuild(arg, history) {
   console.log(c.dim('\n  building…\n'));
   let full = '';
   try {
-    for await (const delta of chatStream(cfg.provider, [{ role: 'system', content: sys }, { role: 'user', content: goal }])) {
-      process.stdout.write(c.faint(delta));
-      full += delta;
+    for await (const ev of chatStream(cfg.provider, [{ role: 'system', content: sys }, { role: 'user', content: goal }])) {
+      process.stdout.write(c.faint(ev.text));
+      if (ev.type === 'content') full += ev.text; // keep reasoning out of the parsed file
     }
   } catch (e) { console.log(c.red('\n  build failed: ') + c.dim(e.message)); return; }
 
@@ -287,4 +404,111 @@ async function doBuild(arg, history) {
   win.write('index.html', html);
   console.log('\n\n' + c.green('  ✓ Build complete — see the live window.') + c.dim(`  files in ${win.dir}\n`));
   history.push({ role: 'user', content: 'build: ' + goal }, { role: 'assistant', content: '[built index.html]' });
+}
+
+// ── Multimodal staging (spec 2.1) ───────────────────────────────────────────
+// Stage a file: validate + harvest metadata off the main thread, then keep it
+// as session context injected into subsequent prompts.
+async function doStage(arg, staged) {
+  const path = (arg || (await prompts({ type: 'text', name: 'p', message: 'File to stage:' })).p || '').trim().replace(/^["']|["']$/g, '');
+  if (!path) return;
+
+  process.stdout.write('\n');
+  const anim = stateAnimation('running', { label: 'ingesting ' + path.split(/[\\/]/).pop() });
+  let rec;
+  try {
+    rec = await stageFile(path);
+  } catch (e) {
+    anim.stop();
+    const cls = classify(e);
+    const report = cls ? diagnostic(cls.code, { ...cls.ctx, path }) : reportFor(e, { module: 'Pipeline.Multimodal.Intake' });
+    console.log(renderDiagnostic(report) + '\n');
+    return;
+  }
+  anim.stop();
+
+  // Replace any earlier staging of the same file.
+  const idx = staged.findIndex((s) => s.path === rec.path);
+  if (idx >= 0) staged[idx] = rec; else staged.push(rec);
+
+  const pad = '  ';
+  console.log(pad + c.green(glyph.ok + ' staged ') + c.white(rec.name) + c.dim('  ' + glyph.dot + '  ' + rec.category.label) + (rec.cached ? c.faint('  (cached)') : ''));
+  console.log(pad + c.dim('  type    ') + c.white(rec.mime) + c.faint('  · ' + rec.confidence));
+  console.log(pad + c.dim('  size    ') + c.white(humanBytes(rec.size)) + c.faint('  · sha256 ' + rec.sha256.slice(0, 12) + '…'));
+  const summary = metaSummary(rec);
+  if (summary) console.log(pad + c.dim('  meta    ') + c.white(summary));
+  if (rec.preview?.text) console.log(pad + c.dim('  preview ') + c.faint(truncate(rec.preview.text.replace(/\s+/g, ' '), 72)));
+  console.log(pad + c.dim('  strategy ') + c.faint(rec.category.strategy));
+
+  // Surface pipeline warnings as self-healing diagnostics (informational).
+  for (const w of rec.warnings) {
+    const d = diagnostic(w, { path: rec.path, actual: rec.extMismatch?.actual });
+    if (d) console.log('\n' + renderDiagnostic(d));
+  }
+  console.log('');
+}
+
+function showStaged(staged) {
+  if (!staged.length) { console.log(c.dim('\n  No files staged. Use ') + c.white('/stage <path>') + c.dim(' to add context.\n')); return; }
+  console.log('\n  ' + c.gold(glyph.spark + ' Staged context') + c.dim('   ' + staged.length + ' file' + (staged.length === 1 ? '' : 's')) + '\n');
+  staged.forEach((s, i) => {
+    console.log('  ' + c.gold((i + 1) + '.') + ' ' + c.white(s.name) + c.dim('  ' + glyph.dot + '  ' + s.category.label + '  ' + glyph.dot + '  ' + humanBytes(s.size)));
+    const m = metaSummary(s);
+    if (m) console.log('     ' + c.faint(m));
+  });
+  console.log('');
+}
+
+function doUnstage(arg, staged) {
+  const a = (arg || '').trim().toLowerCase();
+  if (!staged.length) { console.log(c.dim('\n  Nothing staged.\n')); return; }
+  if (!a || a === 'all') { staged.length = 0; console.log(c.dim('\n  Cleared all staged files.\n')); return; }
+  const n = Number(a);
+  let removed;
+  if (Number.isInteger(n) && n >= 1 && n <= staged.length) removed = staged.splice(n - 1, 1)[0];
+  else {
+    const idx = staged.findIndex((s) => s.name.toLowerCase() === a || s.path.toLowerCase().endsWith(a));
+    if (idx >= 0) removed = staged.splice(idx, 1)[0];
+  }
+  console.log(removed ? c.dim('\n  Unstaged ') + c.white(removed.name) + '\n' : c.dim('\n  No staged file matched “' + arg + '”.\n'));
+}
+
+// Configure speculative routing (spec 2.2): pick a small/fast model for simple
+// queries; complex ones stay on the primary model.
+async function configureRoute() {
+  const cfg = config.read();
+  if (!cfg.provider) { console.log('\n' + renderDiagnostic(diagnostic('NO_PROVIDER')) + '\n'); return; }
+  const cur = cfg.routing || {};
+  const { enabled } = await prompts({ type: 'toggle', name: 'enabled', message: 'Speculative routing (small model for simple queries)?', initial: !!cur.enabled, active: 'on', inactive: 'off' });
+  if (enabled === undefined) return;
+  let small = cur.small || '';
+  if (enabled) {
+    let choices = [];
+    try { const { listModels } = await import('./providers.js'); choices = (await listModels(cfg.provider)).slice(0, 60); } catch { /* manual entry */ }
+    const r = choices.length
+      ? await prompts({ type: 'autocomplete', name: 'm', message: 'Small/fast model for simple queries', choices: choices.map((m) => ({ title: m, value: m })), initial: 0 })
+      : await prompts({ type: 'text', name: 'm', message: 'Small/fast model id', initial: small });
+    small = r.m || small;
+  }
+  config.write({ routing: { enabled: !!enabled, small } });
+  console.log('\n  ' + c.green(glyph.ok + ' Routing ') + c.white(enabled ? 'on' : 'off') + (enabled && small ? c.dim('  · simple → ') + c.white(small) + c.dim('  · complex → ') + c.white(cfg.provider.model) : '') + '\n');
+}
+
+// Demo the five agent-state animations (spec 2.3), so all render styles and
+// frame rates can be seen on demand.
+async function demoStates() {
+  const labels = {
+    thinking: 'Parsing initial prompt context & metadata',
+    'thinking-deeper': 'Executing complex logic / CoT expansion',
+    running: 'Executing local scripts, commands, or tests',
+    connecting: 'Negotiating remote socket / API handshake',
+    paused: 'Idle; waiting for human input or permission',
+  };
+  console.log('\n  ' + c.gold(glyph.spark + ' Agent state animations') + c.dim('   5 states\n'));
+  for (const state of STATE_NAMES) {
+    const anim = stateAnimation(state, { label: state + ' — ' + labels[state] });
+    await new Promise((r) => setTimeout(r, 1600));
+    anim.stop();
+  }
+  console.log('  ' + c.green(glyph.ok + ' all states rendered') + '\n');
 }

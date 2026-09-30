@@ -1,14 +1,15 @@
 {
   "name": "700-ai",
-  "version": "1.17.8",
+  "version": "2.0.0",
   "description": "700 AI — a proprietary local AI assistant for your terminal. Any provider, your keys, your machine.",
   "type": "module",
   "bin": {
     "700": "bin/700.js",
-    "700ai": "bin/700.js"
+    "700ai": "bin/700.js",
+    "ai700": "bin/700.js"
   },
   "scripts": {
-    "start": "node bin/700.js",
+    "start": "node bin/700.js start",
     "setup": "node bin/700.js setup"
   },
   "engines": {
