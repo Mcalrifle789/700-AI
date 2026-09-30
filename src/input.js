@@ -64,6 +64,10 @@ function ensureFallback(input, output) {
 async function pickSlash(commands, output, input = process.stdin) {
   const limit = Math.min(12, Math.max(1, commands.length));
   const nameW = Math.max(...commands.map((cmd) => cmd.name.length)) + 2;
+  // writeHeader() emits exactly this many lines (blank + rule + title + hint
+  // + rule) before the dynamic block starts. finish() relies on this count to
+  // erase precisely the palette region.
+  const HEADER_LINES = 5;
 
   readline.emitKeypressEvents(input);
   if (input.isTTY) input.setRawMode(true);
@@ -125,7 +129,14 @@ async function pickSlash(commands, output, input = process.stdin) {
       input.off('keypress', onKey);
       unregisterRefresh(paletteRefresh);
       if (input.isTTY) input.setRawMode(false);
-      output.write(ESC + drawn + 'A\r' + clearDown); // erase the whole palette
+      // Erase EXACTLY the palette and its leading blank separator line: the
+      // cursor is parked on the block's top line, so step up over the 5 header
+      // lines + the blank line and clear down. Never move further up —
+      // overshooting lands inside the splash wallpaper and clearDown would eat
+      // the background (this used to happen on every open/close cycle,
+      // progressively deleting it). The cursor then sits exactly where the
+      // next input box belongs, so the layout doesn't drift either.
+      output.write(up(HEADER_LINES + 1) + '\r' + clearDown);
       resolve(value);
     }
 
