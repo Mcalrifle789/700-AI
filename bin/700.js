@@ -8,6 +8,7 @@
 import { startRepl } from '../src/repl.js';
 import { runSetup } from '../src/setup.js';
 import { c, brand, VERSION } from '../src/theme.js';
+import { config } from '../src/store.js';
 
 function printHelp() {
   console.log('\n' + brand('  700 AI') + c.dim('  — a local AI assistant for your terminal') + '\n');
@@ -28,13 +29,24 @@ async function main() {
 
   switch (cmd) {
     case 'start':
+      // Setup gate: 700 AI can't be used until setup has been completed once.
+      if (!config.read().onboarded) {
+        console.log('\n' + brand('  Welcome to 700 AI') + c.dim('  — one-time setup comes first.'));
+        console.log(c.dim('  Connect at least one model provider; you can change everything later with ') + c.white('/setup') + c.dim('.'));
+        const ok = await runSetup();
+        if (!ok) {
+          console.log(c.gold('  700 AI needs setup to finish before it can start.') + c.dim('  Run ') + c.white('ai700 start') + c.dim(' again when you\'re ready.\n'));
+          process.exitCode = 1;
+          break;
+        }
+      }
       await startRepl();
       break;
     case undefined:
       printHelp();
       break;
     case 'setup':
-      await runSetup();
+      if (!(await runSetup())) process.exitCode = 1;
       break;
     case '-v':
     case '--version':

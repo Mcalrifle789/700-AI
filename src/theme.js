@@ -4,7 +4,8 @@ import chalk from 'chalk';
 import gradient from 'gradient-string';
 
 export const ember = gradient(['#7a0d05', '#c0392b', '#e67e22', '#f1c40f']);
-export const brand = gradient(['#e74c3c', '#e67e22', '#f1c40f', '#7ba428']);
+// The 700 AI logo gradient: bright gold → red (shared with the splash wordmark).
+export const brand = gradient(['#ffc40f', '#ff8a14', '#ea3c23']);
 
 export const c = {
   red: chalk.hex('#e74c3c'),
@@ -17,4 +18,4 @@ export const c = {
   box: chalk.hex('#8a2b1a'),
 };
 
-export const VERSION = '2.0.0';
+export const VERSION = '2.1.0';

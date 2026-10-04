@@ -1,6 +1,6 @@
 {
   "name": "700-ai",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "700 AI — a proprietary local AI assistant for your terminal. Any provider, your keys, your machine.",
   "type": "module",
   "bin": {
@@ -10,7 +10,8 @@
   },
   "scripts": {
     "start": "node bin/700.js start",
-    "setup": "node bin/700.js setup"
+    "setup": "node bin/700.js setup",
+    "test": "node --test test/*.test.mjs"
   },
   "engines": {
     "node": ">=18"

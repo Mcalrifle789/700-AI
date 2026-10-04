@@ -6,6 +6,7 @@ import { glyph } from '../ui.js';
 import { config } from '../store.js';
 import * as spotify from './spotify.js';
 import * as apple from './apple.js';
+import { pickList } from '../picker.js';
 
 const PROVIDERS = { spotify, apple };
 
@@ -26,11 +27,11 @@ export async function connectMusic() {
   console.log('\n' + c.gold('  ' + glyph.spark + ' 700 AI — Music') + '\n');
   const active = activeProvider();
   if (active) console.log(c.dim('  Currently connected: ') + c.white(active.mod.label) + '\n');
-  const { provider } = await prompts({
-    type: 'select', name: 'provider', message: 'Connect a music service',
-    choices: [
-      { title: 'Spotify  ' + c.dim('(play/pause/next, playlists — needs Premium)'), value: 'spotify' },
-      { title: 'Apple Music  ' + c.dim('(catalog search + open-in-app)'), value: 'apple' },
+  const provider = await pickList({
+    title: 'Connect a music service', filter: false,
+    items: [
+      { label: 'Spotify', desc: 'play/pause/next, playlists — needs Premium', value: 'spotify' },
+      { label: 'Apple Music', desc: 'catalog search + open-in-app', value: 'apple' },
     ],
   });
   if (!provider) return;
@@ -48,11 +49,9 @@ export async function connectMusic() {
 async function pick(items, message) {
   if (!items.length) return null;
   if (items.length === 1) return items[0];
-  const { i } = await prompts({
-    type: 'select', name: 'i', message,
-    choices: items.map((it, idx) => ({
-      title: it.artist ? `${it.name} — ${it.artist}` : it.name, value: idx,
-    })),
+  const i = await pickList({
+    title: message,
+    items: items.map((it, idx) => ({ label: it.name, desc: it.artist || '', value: idx })),
   });
   return i == null ? null : items[i];
 }

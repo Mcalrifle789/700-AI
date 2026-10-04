@@ -33,6 +33,48 @@ export const PRESETS = [
   { id: 'custom', label: 'Custom (any OpenAI-compatible URL)', baseURL: '', kind: 'openai', defaultModel: '' },
 ];
 
+// ── transport ───────────────────────────────────────────────────────────────
+// Every request gets a connect timeout (headers must arrive) and streams get
+// an idle timeout (no bytes for too long => abort). Previously a stalled
+// provider hung the REPL forever. Timeouts surface as ETIMEDOUT, which the
+// diagnostics layer maps to the NETWORK report and the chat loop retries.
+let CONNECT_MS = 60_000;
+let IDLE_MS = 90_000;
+export function setTransportTimeouts({ connectMs, idleMs } = {}) {
+  if (connectMs) CONNECT_MS = connectMs;
+  if (idleMs) IDLE_MS = idleMs;
+}
+
+function timeoutError(what, ms) {
+  return Object.assign(new Error(`${what} timed out after ${Math.round(ms / 1000)}s`), { code: 'ETIMEDOUT' });
+}
+
+async function guardedFetch(url, init, { signal, connectMs } = {}) {
+  connectMs ??= CONNECT_MS;
+  const ctl = new AbortController();
+  if (signal) {
+    if (signal.aborted) ctl.abort();
+    else signal.addEventListener('abort', () => ctl.abort(), { once: true });
+  }
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; ctl.abort(); }, connectMs);
+  try {
+    const res = await fetch(url, { ...init, signal: ctl.signal });
+    res.controller = ctl;
+    return res;
+  } catch (e) {
+    if (timedOut) throw timeoutError('connection', connectMs);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function failFrom(res) {
+  const body = await res.text().catch(() => '');
+  return Object.assign(new Error(`${res.status} ${body.slice(0, 600)}`), { status: res.status });
+}
+
 // Streaming chat completion. Yields events of the shape
 //   { type: 'content' | 'reasoning', text }
 // so callers can render a reasoning model's "thinking" separately from its
@@ -50,17 +92,17 @@ export async function* chatStream(provider, messages, { signal } = {}) {
 }
 
 async function* openaiStream(provider, messages, signal) {
-  const res = await fetch(`${provider.baseURL}/chat/completions`, {
+  const res = await guardedFetch(`${provider.baseURL}/chat/completions`, {
     method: 'POST',
-    signal,
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${provider.apiKey}`,
     },
     body: JSON.stringify({ model: provider.model, messages, stream: true }),
-  });
-  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+  }, { signal });
+  if (!res.ok) throw await failFrom(res);
   yield* sse(res, (json) => {
+    if (json.error) throw Object.assign(new Error(json.error.message || JSON.stringify(json.error)), { status: json.error.code });
     const d = json.choices?.[0]?.delta || {};
     if (d.content) return { type: 'content', text: d.content };
     // OpenRouter/others expose chain-of-thought as `reasoning`; some use
@@ -74,18 +116,18 @@ async function* openaiStream(provider, messages, signal) {
 async function* anthropicStream(provider, messages, signal) {
   const system = messages.filter((m) => m.role === 'system').map((m) => m.content).join('\n');
   const conv = messages.filter((m) => m.role !== 'system');
-  const res = await fetch(`${provider.baseURL}/messages`, {
+  const res = await guardedFetch(`${provider.baseURL}/messages`, {
     method: 'POST',
-    signal,
     headers: {
       'Content-Type': 'application/json',
       'x-api-key': provider.apiKey,
       'anthropic-version': '2023-06-01',
     },
-    body: JSON.stringify({ model: provider.model, system, messages: conv, max_tokens: 4096, stream: true }),
-  });
-  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+    body: JSON.stringify({ model: provider.model, system, messages: conv, max_tokens: 8192, stream: true }),
+  }, { signal });
+  if (!res.ok) throw await failFrom(res);
   yield* sse(res, (json) => {
+    if (json.type === 'error') throw new Error(json.error?.message || 'provider stream error');
     if (json.type !== 'content_block_delta') return null;
     const d = json.delta || {};
     if (d.type === 'thinking_delta' && d.thinking) return { type: 'reasoning', text: d.thinking };
@@ -100,7 +142,16 @@ async function* sse(res, extract) {
   const decoder = new TextDecoder();
   let buffer = '';
   while (true) {
-    const { done, value } = await reader.read();
+    let idle;
+    const stalled = new Promise((_, reject) => {
+      idle = setTimeout(() => { reject(timeoutError('stream', IDLE_MS)); res.controller?.abort(); }, IDLE_MS);
+    });
+    let chunk;
+    const read = reader.read();
+    read.catch(() => {}); // aborted by the idle timer — the race reports it
+    try { chunk = await Promise.race([read, stalled]); }
+    finally { clearTimeout(idle); }
+    const { done, value } = chunk;
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
     const lines = buffer.split('\n');
@@ -110,12 +161,10 @@ async function* sse(res, extract) {
       if (!t.startsWith('data:')) continue;
       const data = t.slice(5).trim();
       if (data === '[DONE]') return;
-      try {
-        const ev = extract(JSON.parse(data));
-        if (ev && ev.text) yield ev;
-      } catch {
-        /* ignore keep-alive / non-JSON frames */
-      }
+      let json;
+      try { json = JSON.parse(data); } catch { continue; } // keep-alive / non-JSON frame
+      const ev = extract(json); // may throw a provider-reported error
+      if (ev && ev.text) yield ev;
     }
   }
 }
@@ -123,30 +172,54 @@ async function* sse(res, extract) {
 // Image generation (OpenAI-compatible /images/generations).
 export async function generateImage(provider, prompt, { size = '1024x1024' } = {}) {
   keyGuard(provider);
-  const res = await fetch(`${provider.baseURL}/images/generations`, {
+  const res = await guardedFetch(`${provider.baseURL}/images/generations`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${provider.apiKey}`,
     },
     body: JSON.stringify({ model: provider.model, prompt, size, n: 1 }),
-  });
-  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+  }, { connectMs: 180_000 });
+  if (!res.ok) throw await failFrom(res);
   const json = await res.json();
   return json.data?.[0]?.url || json.data?.[0]?.b64_json;
 }
 
-// List available models from the configured provider (live API call).
-// Works for OpenAI-compatible providers (GET /models) and native Anthropic.
-export async function listModels(provider) {
+// List available models from a provider (live API call, ~15 s timeout).
+// OpenAI-compatible: GET /models. Anthropic: GET /models, paginated.
+// Returns a sorted, de-duplicated array of model ids.
+export async function listModels(provider, { timeout = 15_000 } = {}) {
   keyGuard(provider);
   const kind = provider.kind || 'openai';
   const headers = kind === 'anthropic'
     ? { 'x-api-key': provider.apiKey, 'anthropic-version': '2023-06-01' }
-    : { Authorization: `Bearer ${provider.apiKey}` };
-  const res = await fetch(`${provider.baseURL}/models`, { headers });
-  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
-  const json = await res.json();
-  const data = json.data || json.models || [];
-  return data.map((m) => (typeof m === 'string' ? m : m.id || m.name)).filter(Boolean);
+    : (provider.apiKey ? { Authorization: `Bearer ${provider.apiKey}` } : {});
+  const ids = new Set();
+  let after = null;
+  for (let page = 0; page < 20; page++) {
+    const qs = kind === 'anthropic' ? `?limit=1000${after ? '&after_id=' + encodeURIComponent(after) : ''}` : '';
+    const res = await guardedFetch(`${provider.baseURL}/models${qs}`, { headers }, { connectMs: timeout });
+    if (!res.ok) throw await failFrom(res);
+    const json = await res.json();
+    const data = json.data || json.models || [];
+    for (const m of data) { const id = typeof m === 'string' ? m : m.id || m.name; if (id) ids.add(id); }
+    if (kind === 'anthropic' && json.has_more && json.last_id) { after = json.last_id; continue; }
+    break;
+  }
+  return [...ids].sort((a, b) => a.localeCompare(b));
 }
+
+// Dynamic model discovery across every configured provider, in parallel.
+// Resolves { [providerId]: { models, error } } - one slow or failing provider
+// never blocks the others.
+export async function discoverModels(providers, opts) {
+  const settled = await Promise.allSettled(providers.map((p) => listModels(p, opts)));
+  const out = {};
+  providers.forEach((p, i) => {
+    const r = settled[i];
+    out[p.id] = r.status === 'fulfilled' ? { models: r.value, error: null } : { models: null, error: r.reason };
+  });
+  return out;
+}
+
+export const presetFor = (id) => PRESETS.find((p) => p.id === id) || null;

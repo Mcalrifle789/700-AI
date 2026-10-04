@@ -4,10 +4,10 @@
 // Live balance is pulled from Stripe when you connect a secret key, so the
 // number reflects REAL money you can pay out to your bank via Stripe payouts.
 // Without a Stripe key it falls back to the local sales ledger.
-import prompts from 'prompts';
 import { c, brand } from './theme.js';
 import { wallet } from './store.js';
 import { maskedInput } from './setup.js';
+import { pickList } from './picker.js';
 
 async function stripeBalance(key) {
   const res = await fetch('https://api.stripe.com/v1/balance', {
@@ -52,14 +52,14 @@ export async function openWallet() {
   }
 
   console.log('');
-  const { action } = await prompts({
-    type: 'select', name: 'action', message: 'Wallet',
-    choices: [
-      { title: 'Connect / update Stripe key (enables bank payouts)', value: 'stripe' },
-      { title: 'Payout to bank (opens Stripe payouts)', value: 'payout' },
-      { title: 'Close', value: 'close' },
+  const action = await pickList({
+    title: 'Wallet', filter: false, summary: false,
+    items: [
+      { label: 'Connect / update Stripe key', desc: 'enables bank payouts', value: 'stripe' },
+      { label: 'Payout to bank', desc: 'opens Stripe payouts', value: 'payout' },
+      { label: 'Close', value: 'close' },
     ],
-  }, { onCancel: () => ({ action: 'close' }) });
+  });
 
   if (action === 'stripe') {
     const entered = await maskedInput('Stripe secret key (sk_live_...):');

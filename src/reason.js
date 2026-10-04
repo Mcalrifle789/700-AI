@@ -34,19 +34,17 @@ export function classifyComplexity(text, { staged = 0 } = {}) {
 }
 
 // Decide which model handles this turn.
-//   cfg.routing = { enabled, small }  — `small` is a model id on the same provider
-// Returns { model, tier: 'small'|'primary', complexity, cot }.
+//   cfg.routing = { enabled, small: { providerId, model } } — the fast model may
+//   live on any configured provider.
+// Returns { choice, tier: 'small'|'primary', complexity, cot }. `choice` is the
+// small model's catalog choice when routed, or null = use the session's model.
 export function route(text, cfg, { staged = 0 } = {}) {
   const complexity = classifyComplexity(text, { staged });
-  const primary = cfg.provider?.model;
   const r = cfg.routing;
-  const useSmall = r?.enabled && r?.small && complexity === 'simple';
-  return {
-    model: useSmall ? r.small : primary,
-    tier: useSmall ? 'small' : 'primary',
-    complexity,
-    cot: complexity === 'complex',
-  };
+  const small = r?.enabled && r.small?.model && complexity === 'simple'
+    ? { kind: 'provider', providerId: r.small.providerId, model: r.small.model }
+    : null;
+  return { choice: small, tier: small ? 'small' : 'primary', complexity, cot: complexity === 'complex' };
 }
 
 // Build the final message array: optionally prepend CoT scaffolding as an extra

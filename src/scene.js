@@ -4,6 +4,7 @@
 // stamped on top. Everything is drawn into a 2D cell buffer, then emitted.
 import chalk from 'chalk';
 import { VERSION } from './theme.js';
+import { sampleRGB, wave } from './gradient.js';
 
 // Engraved-serif wordmark. Rasterized from the installed Engravers (engravrl.ttf)
 // font and shaded into terminal cells (░▒▓█), so the letterforms match the real
@@ -32,7 +33,6 @@ const STARS = [
 // Color ramps.
 const EMBER = ['#1c0603', '#5c0f06', '#a52a1a', '#e0621f', '#f4b024', '#ffe07a'];
 const NEBULA = ['#08140a', '#16300f', '#33581c', '#6f8a2e', '#b6b84e', '#e9ea86'];
-const BRAND = ['#e74c3c', '#e67e22', '#f1c40f', '#8bbf3a']; // 700 (red→gold) → AI (gold→green)
 
 const clamp = (v, a = 0, b = 1) => Math.max(a, Math.min(b, v));
 
@@ -118,6 +118,40 @@ function paintBackground(s) {
   }
 }
 
+// Wordmark colour: bright gold → red gradient (spec: logo gradient), with a
+// soft glow toward the vertical middle. `phase` slides the gradient — 0 is the
+// static logo, and the splash animation advances it forever (ping-pong wave,
+// so the slide is continuous and never jumps).
+const WM_WIDTH = Math.max(...WORDMARK.map((l) => l.length));
+function wordmarkColor(row, col, phase = 0) {
+  const glow = 1 - Math.abs(row - (WORDMARK.length - 1) / 2) / WORDMARK.length;
+  return mix(rgb2hex(sampleRGB(wave(phase + col / WM_WIDTH))), '#fff2c0', glow * 0.22);
+}
+
+// One animation frame: re-colour every letter run in place. Spaces are skipped
+// with absolute cursor moves, so the plaque and the star accents that sit
+// between letters are never overwritten. topRow/leftCol are 1-based screen
+// coordinates of the wordmark's top-left cell. Cursor is saved/restored so the
+// input box underneath keeps its caret.
+export function wordmarkFrame(phase, topRow, leftCol) {
+  let out = '\x1B7';
+  for (let row = 0; row < WORDMARK.length; row++) {
+    const line = WORDMARK[row];
+    for (let col = 0; col < line.length;) {
+      if (line[col] === ' ') { col++; continue; }
+      let end = col;
+      while (end < line.length && line[end] !== ' ') end++;
+      out += `\x1B[${topRow + row};${leftCol + col}H`;
+      for (let k = col; k < end; k++) out += chalk.hex(wordmarkColor(row, k, phase))(line[k]);
+      col = end;
+    }
+  }
+  return out + '\x1B8';
+}
+
+let _geo = null; // { x0, y0 } of the wordmark inside the last built scene
+export const wordmarkGeometry = () => _geo;
+
 function stampWordmark(s, x0, y0) {
   const width = Math.max(...WORDMARK.map((l) => l.length));
   // Clear a clean plaque behind the wordmark so the thin engraved serifs read
@@ -130,11 +164,7 @@ function stampWordmark(s, x0, y0) {
     for (let col = 0; col < line.length; col++) {
       const ch = line[col];
       if (ch === ' ') continue;
-      // Brighten slightly toward the vertical middle for a glow.
-      const glow = 1 - Math.abs(row - (WORDMARK.length - 1) / 2) / WORDMARK.length;
-      const base = ramp(BRAND, col / width);
-      const fg = mix(base, '#fff2c0', glow * 0.22);
-      s.set(x0 + col, y0 + row, ch, fg);
+      s.set(x0 + col, y0 + row, ch, wordmarkColor(row, col));
     }
   }
   // Scatter bright star accents around the wordmark for extra detail.
@@ -170,6 +200,7 @@ export function buildScene(cfg) {
   const x0 = Math.max(1, Math.floor((W - wmWidth) / 2));
   const y0 = Math.max(2, Math.floor(H * 0.42) - Math.floor(WORDMARK.length / 2));
   stampWordmark(s, x0, y0);
+  _geo = { x0, y0 };
   _frameLeft = marginX;
 
   const white = '#e8e6e3';

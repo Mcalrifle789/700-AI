@@ -16,6 +16,7 @@ import prompts from 'prompts';
 import open from 'open';
 import { c } from '../theme.js';
 import { glyph } from '../ui.js';
+import { pickList } from '../picker.js';
 
 export const label = 'Apple Music';
 
@@ -54,11 +55,11 @@ export async function connect() {
   console.log(c.dim('  Your personal iCloud library and native playback need MusicKit'));
   console.log(c.dim('  (browser/Apple device), so /playlists (your library) is unavailable here.') + '\n');
 
-  const { how } = await prompts({
-    type: 'select', name: 'how', message: 'How do you want to provide the developer token?',
-    choices: [
-      { title: 'From my MusicKit key (Team ID + Key ID + .p8)', value: 'key' },
-      { title: 'Paste a developer token I already generated', value: 'token' },
+  const how = await pickList({
+    title: 'Developer token', subtitle: 'how do you want to provide it?', filter: false,
+    items: [
+      { label: 'From my MusicKit key', desc: 'Team ID + Key ID + .p8', value: 'key' },
+      { label: 'Paste a developer token I already generated', value: 'token' },
     ],
   });
   if (!how) return null;

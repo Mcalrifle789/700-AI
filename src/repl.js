@@ -1,14 +1,16 @@
 // The 700 AI interactive terminal loop.
 import readline from 'readline';
-import prompts from 'prompts';
 import { c, brand, ember } from './theme.js';
 import { config, wallet } from './store.js';
-import { renderSplash, frameLeft } from './splash.js';
+import { renderSplash, frameLeft, stopLogoAnimation } from './splash.js';
 import { spinner, glyph, centerLine, rule, termWidth, setTerminalTitle, enterFullscreen, leaveFullscreen, onResize } from './ui.js';
 import { boxInput, requestRefresh, inputActive } from './input.js';
-import { runSetup, SEARCH_PROVIDERS, chooseModel, maskedInput } from './setup.js';
+import { runSetup, maskedInput } from './setup.js';
 import { SKILLS, getSkill } from './skills/index.js';
-import { chatStream, generateImage, PRESETS, requiresKey } from './providers.js';
+import { chatStream, generateImage, requiresKey, listModels } from './providers.js';
+import { pickList, askText, askConfirm } from './picker.js';
+import { catalog, resolve, defaultChoice, describe, refreshModels, choiceKey, parseChoice } from './models.js';
+import { saveSession, listSessions, loadSession, newId, titleFrom } from './sessions.js';
 import { STORE, priceLabel, installPlugin, loadPlugins } from './plugins.js';
 import { openWallet } from './wallet.js';
 import { manageAgents, findAgent } from './agents.js';
@@ -27,12 +29,31 @@ import { runDeploy } from './deploy.js';
 // exiting the app.
 let streamCancel = null;
 
+// The live session: transcript, staged files and the model picked for it with
+// /model (null = the default chosen in setup). /new and /session swap these
+// in place, so every reference to session.history / session.staged stays valid.
+const session = { id: newId(), history: [], staged: [], choice: null };
+const activeChoice = () => session.choice || defaultChoice();
+const activeProvider = () => resolve(activeChoice());
+
+// Persist the current session (only once it has content).
+function persistSession() {
+  if (!session.history.length) return;
+  saveSession({ id: session.id, title: titleFrom(session.history), history: session.history, staged: session.staged, choice: session.choice });
+}
+
+// Redraw the splash for the active session model, with optional notes.
+function splash(notes = []) {
+  renderSplash({ provider: activeProvider(), notes });
+}
+
 export async function startRepl() {
   // Name the terminal tab and take over the full screen (restored on exit).
   setTerminalTitle('700 AI');
   if (enterFullscreen()) {
     process.once('exit', leaveFullscreen);
   }
+  process.once('exit', () => { stopLogoAnimation(); persistSession(); });
   // Ctrl+C cancels a running stream instead of killing the app; with nothing
   // streaming it exits as usual.
   process.on('SIGINT', () => {
@@ -41,7 +62,19 @@ export async function startRepl() {
     process.exit(0);
   });
 
-  renderSplash();
+  // Provider sanity check: a hosted provider with no real key stored (e.g. the
+  // legacy 'ollama' placeholder) can never authenticate — say so up front, as
+  // a splash note so the splash geometry stays measured.
+  const cfg0 = config.read();
+  const startNotes = [];
+  if (cfg0.provider && requiresKey(cfg0.provider) && (!cfg0.provider.apiKey || cfg0.provider.apiKey === 'ollama')) {
+    startNotes.push(c.gold('⚠ ' + cfg0.provider.label + ' has no API key stored — run ') + c.white('/setup'));
+  }
+  splash(startNotes);
+
+  // Model lists go stale; refresh them in the background so /model is instant
+  // and current (dynamic discovery — uses your keys, never blocks the prompt).
+  refreshModels().catch(() => {});
 
   // Terminal resize (minimize/maximize/drag): re-fit the whole app — redraw
   // the splash scene for the new size, then have the active input widget
@@ -54,18 +87,10 @@ export async function startRepl() {
     resizeTimer = setTimeout(() => {
       if (!inputActive()) return; // widget closed while we waited
       console.clear();
-      renderSplash();
+      splash();
       requestRefresh();
     }, 120);
   });
-
-  // Provider sanity check: a hosted provider with no real key stored (e.g. the
-  // legacy 'ollama' placeholder) can never authenticate — say so up front.
-  const cfg0 = config.read();
-  if (cfg0.provider && requiresKey(cfg0.provider) && (!cfg0.provider.apiKey || cfg0.provider.apiKey === 'ollama')) {
-    console.log(c.gold('\n  ⚠ ' + cfg0.provider.label + ' has no API key stored — chat requests will fail auth.')
-      + c.dim('  Run ') + c.white('/setup') + c.dim(' to enter it (masked, verified live).\n'));
-  }
 
   const ctx = { config, wallet, say: (s) => console.log(s) };
   const pluginSkills = await loadPlugins(ctx);
@@ -74,10 +99,15 @@ export async function startRepl() {
   SKILLS.push({ name: 'history', desc: 'Review this session conversation', group: 'know' });
   const allSkills = [...SKILLS, ...pluginSkills];
 
-  const history = [];
-  const staged = [];   // multimodal assets staged via /stage, injected as context
+  const { history, staged } = session;
   for (;;) {
-    const raw = await boxInput({ indent: frameLeft(), placeholder: staged.length ? `${staged.length} file(s) staged · ask anything…` : 'Ask anything…', commands: allSkills });
+    const raw = await boxInput({
+      indent: frameLeft(),
+      placeholder: staged.length ? `${staged.length} file(s) staged · ask anything…` : 'Ask anything…',
+      commands: allSkills,
+      onPalette: stopLogoAnimation, // the palette scrolls the screen under the logo
+    });
+    stopLogoAnimation(); // anything printed from here on moves the splash
     if (raw === null) break;  // EOF on piped/scripted stdin — exit cleanly
     const line = (raw || '').trim();
     if (!line) continue;
@@ -100,18 +130,20 @@ export async function startRepl() {
     if (routed) {
       echoUser(line);
       const msgs = injectStaged([{ role: 'system', content: routed.agent.system }, ...windowHistory(history), { role: 'user', content: routed.message }], staged);
-      await streamChat(msgs, history, routed.message, { model: routed.agent.model });
+      const base = activeProvider();
+      await streamChat(msgs, history, routed.message, { provider: base && routed.agent.model ? { ...base, model: routed.agent.model } : base });
       continue;
     }
 
     // plain conversation — speculative routing + CoT scaffolding (spec 2.2)
     echoUser(line);
-    const cfg = config.read();
-    const r = route(line, cfg, { staged: staged.length });
+    const r = route(line, config.read(), { staged: staged.length });
+    const routedProvider = r.choice && resolve(r.choice);
     let msgs = injectStaged([...windowHistory(history), { role: 'user', content: line }], staged);
     msgs = withScaffold(msgs, { cot: r.cot });
-    await streamChat(msgs, history, line, { model: r.model, tier: r.tier, complexity: r.complexity });
+    await streamChat(msgs, history, line, { provider: routedProvider || activeProvider(), tier: routedProvider ? 'small' : 'primary' });
   }
+  persistSession();
 }
 
 // Prepend the staged multimodal context block as a system message, if any.
@@ -145,14 +177,15 @@ function getCommand(line) {
 
 async function runCommand(name, arg, { history, allSkills, staged }) {
   switch (name) {
-    case 'setup': await runSetup(); return;
+    case 'setup': case 'provider': await doSetup(); return;
     case 'wallet': await openWallet(); return;
     case 'skills': case 'help': printSkills(allSkills); return;
     case 'plugins': await pluginMenu(); return;
     case 'agents': await manageAgents(); return;
-    case 'sessions': console.log(c.dim('\n  Sessions are saved per run in ~/.700ai. (demo build)\n')); return;
-    case 'provider': await runSetup(); return;
-    case 'model': await switchModel(); return;
+    case 'session': case 'sessions': await switchSession(); return;
+    case 'new': newSession(); return;
+    case 'model': await switchModel(arg); return;
+    case 'models': await manageModels(); return;
     case 'image': await doImage(arg); return;
     case 'build': await doBuild(arg, history); return;
     case 'search': await doSearch(arg, history); return;
@@ -176,12 +209,12 @@ async function runCommand(name, arg, { history, allSkills, staged }) {
       console.log(c.dim('\n  Voice needs the ') + c.white('ElevenLabs') + c.dim(' plugin. Try ') + c.white('/plugins') + c.dim('.\n'));
       return;
     }
-    case 'clear': history.length = 0; console.clear(); renderSplash(); return;
-    case 'exit': case 'quit': console.log(c.dim('\n  bye ✦\n')); return 'exit';
+    case 'clear': history.length = 0; console.clear(); splash(); return;
+    case 'exit': case 'quit': persistSession(); console.log(c.dim('\n  bye ✦\n')); return 'exit';
     default: {
       const skill = getSkill(name);
       if (skill?.kind === 'prompt') {
-        const msg = arg || (await prompts({ type: 'text', name: 'm', message: `${skill.name}:` })).m;
+        const msg = arg || (await askText(`${skill.name}:`));
         if (msg) await streamChat([{ role: 'system', content: skill.system }, { role: 'user', content: msg }], history, msg);
         return;
       }
@@ -220,13 +253,12 @@ function gutterWriter(prefix, color = c.white) {
 }
 
 async function streamChat(messages, history, userText, opts = {}) {
-  const cfg = config.read();
-  if (!cfg.provider) {
+  const provider = opts.provider || activeProvider();
+  if (!provider || !provider.baseURL || !provider.model) {
     console.log('\n' + renderDiagnostic(diagnostic('NO_PROVIDER')) + '\n');
     return;
   }
-  const model = opts.model || cfg.provider.model;
-  const provider = { ...cfg.provider, model };
+  const model = provider.model;
   const pad = ' '.repeat(frameLeft() + 1);
   const gutter = pad + c.faint('│ ');
   process.stdout.write('\n');
@@ -280,6 +312,7 @@ async function streamChat(messages, history, userText, opts = {}) {
   if (phase === 'content') renderer.end();
   process.stdout.write('\n');
   history.push({ role: 'user', content: userText }, { role: 'assistant', content: full });
+  persistSession();
 }
 
 const GROUP_STYLE = {
@@ -325,10 +358,10 @@ async function pluginMenu() {
     console.log('  ' + c.white(p.id.padEnd(16)) + priceLabel(p).padEnd(20) + c.dim(p.desc));
   }
   console.log('');
-  const { id } = await prompts({
-    type: 'select', name: 'id', message: 'Install a plugin',
-    choices: [...STORE.map((p) => ({ title: `${p.name} — ${p.price === 0 ? 'free' : '$' + p.price.toFixed(2)}`, value: p.id })), { title: 'Close', value: '' }],
-  }, { onCancel: () => ({ id: '' }) });
+  const id = await pickList({
+    title: 'Install a plugin', filter: false,
+    items: [...STORE.map((p) => ({ label: p.name, desc: p.price === 0 ? 'free' : '$' + p.price.toFixed(2), value: p.id })), { label: 'Close', value: '' }],
+  });
   if (!id) return;
   const item = STORE.find((p) => p.id === id);
   let key = null;
@@ -343,28 +376,228 @@ async function pluginMenu() {
   console.log('\n' + c.green(`  ✓ Installed ${item.name}.`) + c.dim('  Restart 700 AI to activate.\n'));
 }
 
-async function switchModel() {
+// /model — switch the model used in THIS session. Lists every model from every
+// configured provider (discovered live with your keys) plus custom models.
+// The default model from setup is untouched; /new sessions start on it again.
+async function switchModel(arg) {
   const cfg = config.read();
-  if (!cfg.provider) { console.log(c.dim('\n  Run 700 setup first.\n')); return; }
-  const model = await chooseModel(cfg.provider, cfg.provider.model);
-  if (model && model !== cfg.provider.model) {
-    config.write({ provider: { ...cfg.provider, model } });
-    console.log('\n  ' + c.green(glyph.ok + ' Model → ') + c.white(model) + '\n');
-  } else {
-    console.log(c.dim('\n  Model unchanged.\n'));
+  if (!cfg.providers.length && !cfg.customModels.length) {
+    console.log('\n' + renderDiagnostic(diagnostic('NO_PROVIDER')) + '\n');
+    return;
   }
+  await refreshWithSpinner(false);
+  const all = catalog();
+  // Fast path: "/model <id>" picks an exact match directly.
+  if (arg) {
+    const hit = all.find((it) => it.model === arg.trim() || it.name === arg.trim());
+    if (hit) return applyModel(hit);
+    console.log(c.dim('\n  No model named ') + c.white(arg) + c.dim(' — pick from the list.'));
+  }
+  if (!all.length) {
+    console.log(c.dim('\n  No models discovered yet. Check your keys with ') + c.white('/setup') + c.dim(' or add one with ') + c.white('/models') + c.dim('.\n'));
+    return;
+  }
+  const current = choiceKey(activeChoice() || {});
+  const items = [
+    { label: '↻ Refresh model lists', desc: 're-discover from every provider', value: '__refresh__' },
+    ...all.map((it) => ({
+      label: it.kind === 'custom' ? it.name : it.model,
+      desc: (it.kind === 'custom' ? 'custom · ' + it.model : it.providerLabel) + (choiceKey(it) === current ? '  · current' : ''),
+      value: choiceKey(it),
+    })),
+  ];
+  console.log('');
+  const v = await pickList({
+    title: 'Model for this session', subtitle: all.length + ' models', items, filter: true, summary: false,
+    initial: items.some((it) => it.value === current) ? current : 1,
+  });
+  if (v === null) { console.log(c.dim('  Model unchanged — ') + c.white(describe(activeChoice())) + '\n'); return; }
+  if (v === '__refresh__') { await refreshWithSpinner(true); return switchModel(); }
+  applyModel(parseChoice(v));
+}
+
+function applyModel(choice) {
+  session.choice = choice;
+  console.log('\n  ' + c.green(glyph.ok + ' Model → ') + c.white(describe(choice))
+    + c.dim('   this session · default stays ' + describe(defaultChoice())) + '\n');
+  persistSession();
+}
+
+async function refreshWithSpinner(force) {
+  const cfg = config.read();
+  const stale = force || cfg.providers.some((p) => !p.models || Date.now() - (p.modelsAt || 0) > 6 * 3600e3);
+  if (!stale) return;
+  console.log('');
+  const sp = spinner('fetching models from ' + cfg.providers.length + ' provider' + (cfg.providers.length === 1 ? '' : 's') + '…');
+  const errors = await refreshModels({ force }).catch((e) => ({ all: e }));
+  const failed = Object.entries(errors).filter(([, e]) => e);
+  sp.stop(failed.length ? c.gold('⚠') : c.green(glyph.ok), c.dim(failed.length
+    ? 'could not refresh ' + failed.map(([id]) => config.provider(id)?.label || id).join(', ') + ' — showing saved lists'
+    : 'model lists up to date'));
+}
+
+// /models — add or remove custom models (name + model ID + endpoint + API key).
+async function manageModels() {
+  const cfg = config.read();
+  console.log('\n  ' + c.gold(glyph.spark + ' Custom models'));
+  if (cfg.customModels.length) {
+    for (const m of cfg.customModels) console.log('    ' + c.white(m.name) + c.dim('  ' + m.model + '  ·  ' + (m.baseURL || '')));
+  } else console.log(c.faint('    none yet'));
+  const action = await pickList({
+    title: 'Custom models', filter: false, summary: false,
+    items: [
+      { label: '＋ Add a custom model', value: 'add' },
+      ...(cfg.customModels.length ? [{ label: '− Remove a custom model', value: 'remove' }] : []),
+      { label: 'Close', value: 'close' },
+    ],
+  });
+  if (action === 'add') return addCustomModel();
+  if (action === 'remove') {
+    const name = await pickList({ title: 'Remove which model?', filter: false, items: cfg.customModels.map((m) => ({ label: m.name, desc: m.model, value: m.name })) });
+    if (name === null) return;
+    config.write({ customModels: cfg.customModels.filter((m) => m.name !== name) });
+    if (session.choice?.kind === 'custom' && session.choice.name === name) session.choice = null;
+    console.log(c.dim('  Removed ') + c.white(name) + '\n');
+    return;
+  }
+  console.log('');
+}
+
+async function addCustomModel() {
+  const cfg = config.read();
+  const name = (await askText('Display name (how it appears in /model):') || '').trim();
+  if (!name) return console.log(c.dim('  Cancelled.\n'));
+  const model = (await askText('Model ID (exactly as the provider names it):') || '').trim();
+  if (!model) return console.log(c.dim('  Cancelled.\n'));
+
+  const endpoint = await pickList({
+    title: 'Where is this model served?', filter: false,
+    items: [
+      ...cfg.providers.map((p) => ({ label: p.label, desc: p.baseURL, value: 'p:' + p.id })),
+      { label: 'Another OpenAI-compatible endpoint…', value: 'url:openai' },
+      { label: 'Another Anthropic-compatible endpoint…', value: 'url:anthropic' },
+    ],
+  });
+  if (endpoint === null) return console.log(c.dim('  Cancelled.\n'));
+  let baseURL, kind, providerId = null, existingKey = null;
+  if (endpoint.startsWith('p:')) {
+    const p = config.provider(endpoint.slice(2), cfg);
+    ({ baseURL, kind } = p); providerId = p.id; existingKey = p.apiKey;
+  } else {
+    kind = endpoint.slice(4);
+    baseURL = ((await askText('Base URL (e.g. https://api.example.com/v1):')) || '').trim().replace(/\/+$/, '');
+    if (!baseURL) return console.log(c.dim('  Cancelled.\n'));
+  }
+
+  // API key (required). For a configured provider, Enter reuses its key.
+  let apiKey;
+  for (;;) {
+    const entered = await maskedInput('API key for ' + name + (existingKey ? ' (Enter reuses the ' + (config.provider(providerId)?.label || '') + ' key)' : '') + ':');
+    if (entered === null) return console.log(c.dim('  Cancelled.\n'));
+    apiKey = entered.trim() || existingKey || '';
+    if (!apiKey) { console.log(c.red('  ✗ An API key is required.')); continue; }
+    process.stdout.write(c.dim('  verifying…\n'));
+    try {
+      const ids = await listModels({ baseURL, kind, apiKey });
+      console.log(ids.includes(model)
+        ? c.green('  ' + glyph.ok + ' Key accepted and ' + model + ' is available.')
+        : c.gold('  ⚠ Key accepted, but ' + model + ' is not in that endpoint\'s model list — saved anyway; check the ID if requests fail.'));
+      break;
+    } catch (e) {
+      if (classify(e)?.code === 'AUTH') { console.log('\n' + renderDiagnostic(diagnostic('AUTH', { baseURL })) + '\n'); continue; }
+      console.log(c.gold('  ⚠ Could not verify right now (' + String(e.message).split('\n')[0].slice(0, 80) + ') — saved anyway.'));
+      break;
+    }
+  }
+  const entry = { name, model, baseURL, kind, apiKey, ...(providerId ? { providerId } : {}) };
+  config.write({ customModels: [...cfg.customModels.filter((m) => m.name !== name), entry] });
+  console.log(c.green('  ' + glyph.ok + ' Added ') + c.white(name) + c.dim(' — it now appears in ') + c.white('/model') + c.dim('.'));
+  if (await askConfirm('Use ' + name + ' for this session now?', { initial: true })) applyModel({ kind: 'custom', name });
+  else console.log('');
+}
+
+// /new — start a fresh session (the current one is saved for /session).
+function newSession() {
+  persistSession();
+  session.id = newId();
+  session.history.length = 0;
+  session.staged.length = 0;
+  session.choice = null;
+  console.clear();
+  splash([c.green(glyph.ok + ' New session') + c.dim('  ·  previous one saved — ') + c.white('/session') + c.dim(' to switch back')]);
+}
+
+// /session — switch between saved sessions.
+async function switchSession() {
+  persistSession();
+  const all = listSessions();
+  if (!all.length) {
+    console.log(c.dim('\n  No saved sessions yet — chat a little, then ') + c.white('/new') + c.dim(' starts another.\n'));
+    return;
+  }
+  const items = [
+    { label: '＋ Start a new session', value: '__new__' },
+    ...all.map((s) => ({
+      label: s.title,
+      desc: ago(s.at) + '  ·  ' + Math.floor((s.history || []).length / 2) + ' turns' + (s.id === session.id ? '  ·  current' : ''),
+      value: s.id,
+    })),
+  ];
+  console.log('');
+  const id = await pickList({ title: 'Sessions', subtitle: all.length + ' saved', items, summary: false, initial: 1 });
+  if (id === null) { console.log(''); return; }
+  if (id === '__new__') return newSession();
+  if (id === session.id) { console.log(c.dim('  Already in that session.\n')); return; }
+  const s = loadSession(id);
+  if (!s) { console.log(c.red('  Session not found.\n')); return; }
+  session.id = s.id;
+  session.history.splice(0, Infinity, ...(s.history || []));
+  session.staged.splice(0, Infinity, ...(s.staged || []));
+  session.choice = s.choice && resolve(s.choice) ? s.choice : null; // its model may have been removed since
+  console.clear();
+  // Recap instead of the splash: the last few turns, so you know where you are.
+  console.log('\n  ' + c.gold(glyph.spark + ' Session · ') + c.white(s.title) + c.dim('   ' + Math.floor(session.history.length / 2) + ' turns  ·  model ' + describe(activeChoice())) + '\n');
+  const tail = session.history.slice(-6);
+  for (let i = 0; i < tail.length; i++) {
+    const m = tail[i];
+    const head = m.role === 'user' ? c.orange(glyph.prompt + ' you') : c.gold(glyph.spark + ' 700');
+    console.log('  ' + head);
+    console.log('  ' + c.dim(truncate(String(m.content || '').replace(/\s+/g, ' '), Math.max(40, termWidth() - 6))) + '\n');
+  }
+  if (session.staged.length) console.log(c.dim('  ' + session.staged.length + ' staged file(s) restored — ') + c.white('/staged') + '\n');
+}
+
+function ago(iso) {
+  const s = Math.max(0, (Date.now() - Date.parse(iso || 0)) / 1000);
+  if (s < 90) return 'just now';
+  if (s < 3600) return Math.round(s / 60) + ' min ago';
+  if (s < 86400) return Math.round(s / 3600) + ' h ago';
+  return Math.round(s / 86400) + ' d ago';
+}
+
+// /setup inside the REPL: apply the new configuration immediately — the
+// session returns to the (possibly new) default model and the splash redraws
+// with the new provider/model.
+async function doSetup() {
+  const ok = await runSetup();
+  if (!ok) return;
+  session.choice = null;
+  console.clear();
+  splash([c.green(glyph.ok + ' Setup saved') + c.dim('  ·  model ') + c.white(describe(defaultChoice()))]);
 }
 
 async function doImage(arg) {
   const cfg = config.read();
-  const prompt = arg || (await prompts({ type: 'text', name: 'p', message: 'Image prompt:' })).p;
+  const prompt = arg || (await askText('Image prompt:'));
   if (!prompt) return;
   if (!cfg.imageModel) { console.log(c.dim('\n  Enable images in ') + c.white('700 setup') + c.dim('.\n')); return; }
   const win = await startPreview('700 AI — Image');
   console.log('');
   const sp = spinner('generating image…');
   try {
-    const provider = { ...cfg.provider, model: cfg.imageModel.model };
+    // The image model lives on the provider picked for it in setup.
+    const rec = config.provider(cfg.imageModel.provider, cfg) || cfg.provider;
+    const provider = { ...rec, model: cfg.imageModel.model };
     const url = await generateImage(provider, prompt);
     const src = url.startsWith('http') ? url : `data:image/png;base64,${url}`;
     win.write('index.html', `<body style="margin:0;background:#0a0a0a;display:grid;place-items:center;height:100vh"><img src="${src}" style="max-width:96%;max-height:96%"></body>`);
@@ -378,7 +611,7 @@ async function doImage(arg) {
 // provider is set) synthesize a cited answer grounded in those results.
 async function doSearch(arg, history) {
   const cfg = config.read();
-  const query = arg || (await prompts({ type: 'text', name: 'q', message: 'Search:' })).q;
+  const query = arg || (await askText('Search:'));
   if (!query) return;
 
   console.log('');
@@ -401,7 +634,7 @@ async function doSearch(arg, history) {
     console.log('');
   });
 
-  if (cfg.provider) {
+  if (activeProvider()) {
     const context = results.map((r, i) => `[${i + 1}] ${r.title}\n${r.url}\n${r.snippet}`).join('\n\n');
     const sys = 'Answer the user question using ONLY the search results provided. Cite sources inline as [n]. If the results are insufficient, say so.';
     await streamChat(
@@ -431,9 +664,9 @@ function showHistory(history) {
 
 // Build mode: model returns files; each is streamed into the live window.
 async function doBuild(arg, history) {
-  const cfg = config.read();
-  if (!cfg.provider) { console.log(c.dim('\n  Run 700 setup first.\n')); return; }
-  const goal = arg || (await prompts({ type: 'text', name: 'g', message: 'What should 700 AI build?' })).g;
+  const provider = activeProvider();
+  if (!provider) { console.log('\n' + renderDiagnostic(diagnostic('NO_PROVIDER')) + '\n'); return; }
+  const goal = arg || (await askText('What should 700 AI build?'));
   if (!goal) return;
 
   const win = await startPreview('700 AI — Live Build');
@@ -443,7 +676,7 @@ async function doBuild(arg, history) {
   console.log(c.dim('\n  building…\n'));
   let full = '';
   try {
-    for await (const ev of chatStream(cfg.provider, [{ role: 'system', content: sys }, { role: 'user', content: goal }])) {
+    for await (const ev of chatStream(provider, [{ role: 'system', content: sys }, { role: 'user', content: goal }])) {
       process.stdout.write(c.faint(ev.text));
       if (ev.type === 'content') full += ev.text; // keep reasoning out of the parsed file
     }
@@ -459,7 +692,7 @@ async function doBuild(arg, history) {
 // Stage a file: validate + harvest metadata off the main thread, then keep it
 // as session context injected into subsequent prompts.
 async function doStage(arg, staged) {
-  const path = (arg || (await prompts({ type: 'text', name: 'p', message: 'File to stage:' })).p || '').trim().replace(/^["']|["']$/g, '');
+  const path = (arg || (await askText('File to stage:')) || '').trim().replace(/^["']|["']$/g, '');
   if (!path) return;
 
   process.stdout.write('\n');
@@ -528,19 +761,27 @@ async function configureRoute() {
   const cfg = config.read();
   if (!cfg.provider) { console.log('\n' + renderDiagnostic(diagnostic('NO_PROVIDER')) + '\n'); return; }
   const cur = cfg.routing || {};
-  const { enabled } = await prompts({ type: 'toggle', name: 'enabled', message: 'Speculative routing (small model for simple queries)?', initial: !!cur.enabled, active: 'on', inactive: 'off' });
-  if (enabled === undefined) return;
-  let small = cur.small || '';
-  if (enabled) {
-    let choices = [];
-    try { const { listModels } = await import('./providers.js'); choices = (await listModels(cfg.provider)).slice(0, 60); } catch { /* manual entry */ }
-    const r = choices.length
-      ? await prompts({ type: 'autocomplete', name: 'm', message: 'Small/fast model for simple queries', choices: choices.map((m) => ({ title: m, value: m })), initial: 0 })
-      : await prompts({ type: 'text', name: 'm', message: 'Small/fast model id', initial: small });
-    small = r.m || small;
+  console.log('');
+  const on = await pickList({
+    title: 'Speculative routing', subtitle: 'fast model for simple asks', filter: false,
+    items: [{ label: 'On', value: true }, { label: 'Off', value: false }], initial: cur.enabled ? 0 : 1,
+  });
+  if (on === null) return;
+  let small = cur.small || null;
+  if (on) {
+    const all = catalog().filter((it) => it.kind === 'provider');
+    if (!all.length) { console.log(c.dim('  No models discovered yet — run ') + c.white('/model') + c.dim(' first.\n')); return; }
+    const v = await pickList({
+      title: 'Fast model for simple queries', items: all.map((it) => ({ label: it.model, desc: it.providerLabel, value: choiceKey(it) })),
+      initial: small ? choiceKey({ kind: 'provider', ...small }) : 0,
+    });
+    if (v === null) return;
+    const ch = parseChoice(v);
+    small = { providerId: ch.providerId, model: ch.model };
   }
-  config.write({ routing: { enabled: !!enabled, small } });
-  console.log('\n  ' + c.green(glyph.ok + ' Routing ') + c.white(enabled ? 'on' : 'off') + (enabled && small ? c.dim('  · simple → ') + c.white(small) + c.dim('  · complex → ') + c.white(cfg.provider.model) : '') + '\n');
+  config.write({ routing: { enabled: !!on, small } });
+  console.log('  ' + c.green(glyph.ok + ' Routing ') + c.white(on ? 'on' : 'off')
+    + (on && small ? c.dim('  · simple → ') + c.white(small.model) + c.dim('  · complex → ') + c.white(describe(activeChoice())) : '') + '\n');
 }
 
 // Demo the five agent-state animations (spec 2.3), so all render styles and

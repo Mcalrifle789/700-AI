@@ -5,6 +5,8 @@
 import readline from 'readline';
 import { c, brand, ember } from './theme.js';
 import { glyph } from './ui.js';
+import { pickList } from './picker.js';
+import { registerRefresh, unregisterRefresh, readLine, createReportFilter } from './term.js';
 
 // Group → accent color + marker, shared by the command palette.
 const GROUP_STYLE = {
@@ -24,164 +26,28 @@ const down = (n = 1) => ESC + n + 'B';
 const right = (n) => (n > 0 ? ESC + n + 'C' : '');
 const clearDown = ESC + '0J';
 
-// Active-widget registry for terminal resize. The REPL re-renders the splash
-// scene when the window is resized, then calls requestRefresh() so whichever
-// input widget is on screen (input box or command palette) redraws itself
-// fresh beneath it. `inputActive()` tells the REPL whether an input widget is
-// on screen at all — if not (streaming output, command running), the resize is
-// left alone so live output isn't wiped.
-let refreshCb = null;
-let activeWidgets = 0;
-export function requestRefresh() { refreshCb?.(); }
-export const inputActive = () => activeWidgets > 0;
-function registerRefresh(fn) { refreshCb = fn; activeWidgets++; }
-function unregisterRefresh(fn) { if (refreshCb === fn) refreshCb = null; activeWidgets = Math.max(0, activeWidgets - 1); }
+// Resize registry and the non-TTY reader live in term.js (shared with the
+// dropdown engine); re-exported here for the REPL.
+export { requestRefresh, inputActive } from './term.js';
 
-// Non-TTY line reader shared across prompts. A persistent 'line' listener
-// queues every line as the stream delivers it, so input buffered during an
-// async gap (e.g. while a staged file is processed off-thread) is never lost.
-let _fallback = null;
-function ensureFallback(input, output) {
-  if (_fallback) return _fallback;
-  const rl = readline.createInterface({ input, output });
-  const state = { queue: [], waiters: [], ended: false };
-  rl.on('line', (l) => {
-    if (state.waiters.length) state.waiters.shift()(l);
-    else state.queue.push(l);
-  });
-  rl.on('close', () => { state.ended = true; while (state.waiters.length) state.waiters.shift()(null); });
-  _fallback = state;
-  return state;
-}
-
-// A scrollable, type-to-filter command palette, driven by raw-mode keypress
-// capture (same mechanism as boxInput — not prompts, whose autocomplete can't
-// delete its own prompt text). The leading "/" is a real, deletable character:
-// typing appends to the filter, backspace removes characters, and backspacing
-// an empty filter deletes the "/" itself — closing the palette and handing
-// control back to the input box. Esc cancels. Returns the chosen command line
-// (e.g. "/play") or '' if cancelled.
+// The "/" command palette — a thin wrapper over the shared dropdown engine
+// (picker.js). The leading "/" is a real, deletable character: backspacing an
+// empty filter deletes it and hands control back to the input box. Esc closes.
+// Layout: the box erased itself and left the cursor on its top line; the
+// palette prints a blank separator + header there, and on close erases exactly
+// that region plus the box's own leading blank line (eraseAbove: 1), so the
+// next box lands where this one was — no drift, no eaten wallpaper.
 async function pickSlash(commands, output, input = process.stdin) {
-  const limit = Math.min(12, Math.max(1, commands.length));
-  const nameW = Math.max(...commands.map((cmd) => cmd.name.length)) + 2;
-  // writeHeader() emits exactly this many lines (blank + rule + title + hint
-  // + rule) before the dynamic block starts. finish() relies on this count to
-  // erase precisely the palette region.
-  const HEADER_LINES = 5;
-
-  readline.emitKeypressEvents(input);
-  if (input.isTTY) input.setRawMode(true);
-
-  return new Promise((resolve) => {
-    let query = '';   // characters typed after the "/"
-    let sel = 0;
-    let drawn = 0;    // dynamic lines currently on screen (for erase)
-    let scroll = 0;   // first visible row index in the result list
-
-    // Header — rebuilt on resize so the rules fit the new width.
-    function writeHeader() {
-      const cols = Math.min(output.columns || 80, 72);
-      const rule = ember('─'.repeat(cols - 4));
-      output.write('\n');
-      output.write('  ' + rule + '\n');
-      output.write('  ' + c.gold(glyph.spark + ' ') + brand('700 AI') + c.dim('   Command Palette') + '\n');
-      output.write('  ' + c.faint('type to filter   ' + glyph.dot + '   ↑↓ move   ' + glyph.dot + '   ↵ run   ' + glyph.dot + '   ⌫ edit / go back   ' + glyph.dot + '   esc close') + '\n');
-      output.write('  ' + rule + '\n');
-    }
-
-    const results = () => {
-      const q = query.toLowerCase();
-      if (!q) return commands;
-      return commands.filter((cmd) => ('/' + cmd.name + ' ' + (cmd.desc || '')).toLowerCase().includes(q));
-    };
-
-    function render() {
-      const res = results();
-      sel = Math.min(sel, Math.max(0, res.length - 1));
-      // Sliding window: the selection must always be visible, so the list
-      // scrolls under it. (Previously rows beyond `limit` were selectable but
-      // never rendered — long command lists simply couldn't be scrolled.)
-      if (sel < scroll) scroll = sel;
-      if (sel >= scroll + limit) scroll = sel - limit + 1;
-      scroll = Math.max(0, Math.min(scroll, Math.max(0, res.length - limit)));
-      const lines = [];
-      const at = res.length ? (sel + 1) + '/' + res.length : '0';
-      // The query line renders the "/" as part of the text, so the user sees
-      // it — and can backspace it away (which closes the palette).
-      lines.push('  ' + c.gold('❯ /') + c.white(query)
-        + (res.length ? c.faint('   ' + at) : c.red('  no match — ⌫ to go back')));
-      for (let i = 0; i < limit; i++) {
-        const cmd = res[scroll + i];
-        if (!cmd) { lines.push(''); continue; }
-        const st = groupStyle(cmd.group);
-        const name = ('/' + cmd.name).padEnd(nameW);
-        const active = i === sel;
-        lines.push('  ' + (active ? c.gold('❯') : ' ') + ' ' + st.color(st.dot) + '  '
-          + (active ? c.white(name) : st.color(name)) + c.dim(cmd.desc || ''));
-      }
-
-      let s = drawn ? ESC + drawn + 'A\r' : '';
-      drawn = lines.length;
-      // NOTE: ESC already ends with '[' (\x1B[), so erase-line is ESC + '2K',
-      // NOT ESC + '[2K' (double bracket is an invalid CSI and garbles redraw).
-      s += lines.map((l, i) => ESC + '2K' + l + (i < lines.length - 1 ? '\n' : '')).join('');
-      s += ESC + (lines.length - 1) + 'A\r'; // park the cursor on the query line
-      output.write(s);
-    }
-
-    // Fresh full redraw after a terminal resize re-rendered the splash above.
-    const paletteRefresh = () => { drawn = 0; writeHeader(); render(); };
-    registerRefresh(paletteRefresh);
-
-    function finish(value) {
-      input.off('keypress', onKey);
-      unregisterRefresh(paletteRefresh);
-      if (input.isTTY) input.setRawMode(false);
-      // Erase EXACTLY the palette and its leading blank separator line: the
-      // cursor is parked on the block's top line, so step up over the 5 header
-      // lines + the blank line and clear down. Never move further up —
-      // overshooting lands inside the splash wallpaper and clearDown would eat
-      // the background (this used to happen on every open/close cycle,
-      // progressively deleting it). The cursor then sits exactly where the
-      // next input box belongs, so the layout doesn't drift either.
-      output.write(up(HEADER_LINES + 1) + '\r' + clearDown);
-      resolve(value);
-    }
-
-    function onKey(str, key) {
-      key = key || {};
-      if (key.ctrl && key.name === 'c') { output.write('\n'); process.exit(0); return; }
-      // Escape closes the palette. Terminals report Esc inconsistently: usually
-      // key.name 'escape', but sometimes as the bare \x1b byte, Ctrl+[ (same
-      // byte), or with a sequence field — accept all of them.
-      const isEscape = key.name === 'escape' || str === '\x1b' || (key.ctrl && key.name === '[');
-      if (isEscape) return finish('');
-      if (key.name === 'return' || key.name === 'enter') {
-        const res = results();
-        if (!res.length) return; // nothing selected — keep editing
-        return finish('/' + res[sel].name);
-      }
-      if (key.name === 'backspace') {
-        if (query.length) query = query.slice(0, -1);
-        else return finish(''); // deleting the "/" itself exits back to the box
-        sel = 0; render(); return;
-      }
-      if (key.name === 'up') { if (sel > 0) sel--; render(); return; }
-      if (key.name === 'down') { if (sel < results().length - 1) sel++; render(); return; }
-      if (key.name === 'pageup') { sel = Math.max(0, sel - limit); render(); return; }
-      if (key.name === 'pagedown') { sel = Math.min(Math.max(0, results().length - 1), sel + limit); render(); return; }
-      if (key.name === 'home') { sel = 0; render(); return; }
-      if (key.name === 'end') { sel = Math.max(0, results().length - 1); render(); return; }
-      if (str && !key.ctrl && !key.meta) {
-        const printable = [...str].filter((ch) => ch.codePointAt(0) >= 32).join('');
-        if (printable) { query += printable; sel = 0; render(); }
-      }
-    }
-
-    input.on('keypress', onKey);
-    writeHeader();
-    render();
+  const labelWidth = Math.max(...commands.map((cmd) => cmd.name.length)) + 2;
+  const items = commands.map((cmd) => {
+    const st = groupStyle(cmd.group);
+    return { label: '/' + cmd.name, desc: cmd.desc || '', value: '/' + cmd.name, color: st.color, dot: st.dot };
   });
+  const picked = await pickList({
+    title: 'Command Palette', items, filter: true, prefix: '/', backspaceExits: true,
+    leadingBlank: true, eraseAbove: 1, resizable: true, summary: false, labelWidth, input, output,
+  });
+  return picked || '';
 }
 
 // Session-wide input history for ↑/↓ recall (messages and commands alike).
@@ -195,18 +61,13 @@ function rememberInput(line) {
   }
 }
 
-export function boxInput({ input = process.stdin, output = process.stdout, indent = 2, width, placeholder = '', commands = [] } = {}) {
+export function boxInput({ input = process.stdin, output = process.stdout, indent = 2, width, placeholder = '', commands = [], onPalette } = {}) {
   // Non-interactive stdin (piped / no TTY): plain line reader, reused so
   // buffered lines aren't dropped between prompts.
   if (input === process.stdin && !input.isTTY) {
-    const promptStr = ' '.repeat(indent) + c.orange(glyph.prompt) + ' ';
-    const state = ensureFallback(input, output);
-    output.write(promptStr);
-    // Resolve with the next queued line, or null on EOF, so the REPL exits
+    // Resolves with the next queued line, or null on EOF, so the REPL exits
     // cleanly on stream close instead of throwing ERR_USE_AFTER_CLOSE.
-    if (state.queue.length) return Promise.resolve(state.queue.shift());
-    if (state.ended) return Promise.resolve(null);
-    return new Promise((resolve) => state.waiters.push(resolve));
+    return readLine({ input, output, prompt: ' '.repeat(indent) + c.orange(glyph.prompt) + ' ' });
   }
 
   return new Promise((resolve) => {
@@ -217,6 +78,7 @@ export function boxInput({ input = process.stdin, output = process.stdout, inden
     let hist = inputHistory.length; // ↑/↓ browse cursor (=== len → live editing)
     let draft = '';                 // text typed before history recall started
     let pasteMode = false;          // inside a bracketed-paste marker block
+    const reports = createReportFilter();
 
     if (isReal) {
       readline.emitKeypressEvents(input);
@@ -298,6 +160,10 @@ export function boxInput({ input = process.stdin, output = process.stdout, inden
       const seq = key.sequence || (typeof str === 'string' && str.startsWith('\x1B[') ? str : '');
       if (seq && /200~$/.test(seq)) { pasteMode = true; return; }
       if (seq && /201~$/.test(seq)) { pasteMode = false; return; }
+      // Mouse reports, cursor-position replies and stray CSI bytes arrive
+      // split into per-byte keypresses; the report filter reassembles and
+      // swallows them so click coordinates never land in the chatbox.
+      if (reports(str, key)) return;
       if (key.ctrl && key.name === 'c') {
         // Ctrl+C: clear typed text first — exiting on a non-empty line loses
         // work. Only an empty line exits (previous behaviour killed the app
@@ -309,6 +175,7 @@ export function boxInput({ input = process.stdin, output = process.stdout, inden
       if (buf === '' && str === '/' && !key.ctrl && !key.meta && commands.length) {
         cleanup();
         output.write(up(1) + '\r' + clearDown); // erase the empty box
+        onPalette?.();
         pickSlash(commands, output, input).then(resolve);
         return;
       }

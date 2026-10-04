@@ -8,7 +8,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/license-Proprietary-e74c3c" alt="License: Proprietary">
-  <img src="https://img.shields.io/badge/version-2.0.0-e67e22" alt="Version 2.0.0">
+  <img src="https://img.shields.io/badge/version-2.1.0-e67e22" alt="Version 2.1.0">
   <img src="https://img.shields.io/badge/node-%3E%3D18-3c873a" alt="Node >= 18">
 </p>
 
@@ -22,6 +22,25 @@ type leaves your computer except the API calls you make to your chosen provider.
 <p align="center">
   <img src="assets/screenshot.png" alt="700 AI terminal" width="720">
 </p>
+
+## What's new in 2.1
+
+- **Multi-provider setup** — connect several providers at once, each with its
+  own verified key; 700 AI discovers every model each one offers.
+- **Mandatory one-time setup** — `ai700 start` routes first-time users into
+  setup and only starts once it's complete.
+- **`/model` per session, `/models` for custom models, `/new` and `/session`**
+  for multiple saved conversations.
+- **Dropdowns rebuilt** — no more duplicated menus, clicking a command no
+  longer types its coordinates into the chat box, and every menu supports
+  ↑/↓ and W/S, mouse wheel and click.
+- **Animated logo** — the wordmark has a bright gold→red gradient that slides
+  endlessly while the splash is on screen.
+- **Sturdier backend** — connect and idle timeouts on every request (a stalled
+  provider can no longer hang the terminal), provider errors mid-stream are
+  reported instead of producing an empty reply, model discovery runs in
+  parallel across providers with paginated listing and on-disk caching, and
+  config reads are cached in-process.
 
 ## What's new in 2.0
 
@@ -99,23 +118,39 @@ Then, inside the REPL, list everything you can do:
 
 ## First-run setup
 
-On first launch you'll be prompted to configure a provider. Run the guided
-wizard any time with:
-
-```bash
-700 setup
-```
+Setup is **required once**: the first time you run `ai700 start`, 700 AI sends
+you through the guided setup before anything else, and won't start until it's
+finished. Cancelling saves nothing. Re-run it any time with `ai700 setup` or
+`/setup` inside the REPL — changes apply immediately.
 
 It walks you through:
 
-1. **Provider** — pick a preset (OpenAI, Anthropic, OpenRouter, Groq, Mistral,
-   Together, Ollama, or a custom OpenAI-compatible URL).
-2. **Model** — choose from the provider's **live model list**, fetched from its
-   API (with manual entry as a fallback).
-3. **Search** — an optional search provider for search-augmented skills.
-4. **Images** — an optional image-generation model.
+1. **Providers** — pick **one or more** (OpenAI, Anthropic, OpenRouter, Groq,
+   Mistral, Together, Ollama, or a custom OpenAI-compatible URL).
+2. **API keys** — one per selected provider, typed masked and **verified live**.
+   The same call discovers that provider's **full model list** using your key.
+3. **Default model** — chosen from every model across all your providers
+   (with manual entry as a fallback).
+4. **Search** — an optional search provider for search-augmented skills.
+5. **Images** — an optional image-generation model, on any of your providers.
 
-Your keys and settings are saved to `~/.700ai` with owner-only permissions.
+Your keys and settings are saved to `~/.700ai` with owner-only permissions
+(set `AI700_HOME` to use another directory).
+
+## Models & sessions
+
+- `/model` switches the model **for the current session** — every model from
+  every configured provider, plus your custom models. Lists are refreshed
+  live in the background and can be re-fetched from the picker.
+- `/models` adds a **custom model**: a display name, the model ID, where it's
+  served (one of your providers or any OpenAI-/Anthropic-compatible URL), and
+  an API key.
+- `/new` starts a fresh session; `/session` switches between saved sessions
+  (transcript, staged files and session model are restored).
+
+Every menu works the same way: **↑/↓ or W/S** to move, mouse wheel to scroll,
+click to select (click again to choose), type to filter, Enter to choose,
+Esc to cancel.
 
 ## Commands
 
@@ -132,8 +167,11 @@ command — or type a full command directly:
 | Command      | What it does                                         |
 | ------------ | ---------------------------------------------------- |
 | `/skills`    | List all available commands                          |
-| `/setup`     | Re-run setup / switch provider                       |
-| `/model`     | Switch the active model (live list from your provider) |
+| `/setup`     | Re-run setup — providers, keys, default model        |
+| `/model`     | Switch the model for this session (all providers)   |
+| `/models`    | Add or remove a custom model (name, ID, API key)    |
+| `/new`       | Start a new session                                  |
+| `/session`   | Switch between saved sessions                        |
 | `/search`    | Web-search-augmented answer                          |
 | `/build`     | Build an app/site in a live-reloading browser window |
 | `/image`     | Generate an image from a prompt                      |
