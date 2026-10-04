@@ -23,13 +23,23 @@ import { createRenderer } from './format.js';
 import { route, withScaffold } from './reason.js';
 import { runDeploy } from './deploy.js';
 
+// Set while a reply is streaming; Ctrl+C then cancels that reply instead of
+// exiting the app.
+let streamCancel = null;
+
 export async function startRepl() {
   // Name the terminal tab and take over the full screen (restored on exit).
   setTerminalTitle('700 AI');
   if (enterFullscreen()) {
     process.once('exit', leaveFullscreen);
-    process.once('SIGINT', () => { leaveFullscreen(); process.exit(0); });
   }
+  // Ctrl+C cancels a running stream instead of killing the app; with nothing
+  // streaming it exits as usual.
+  process.on('SIGINT', () => {
+    if (streamCancel) { streamCancel.cancelled = true; return; }
+    leaveFullscreen();
+    process.exit(0);
+  });
 
   renderSplash();
 
@@ -59,6 +69,9 @@ export async function startRepl() {
 
   const ctx = { config, wallet, say: (s) => console.log(s) };
   const pluginSkills = await loadPlugins(ctx);
+  // /history — session transcript review. Registered on SKILLS so the palette,
+  // /skills and bare-name lookup all see it.
+  SKILLS.push({ name: 'history', desc: 'Review this session conversation', group: 'know' });
   const allSkills = [...SKILLS, ...pluginSkills];
 
   const history = [];
@@ -69,8 +82,11 @@ export async function startRepl() {
     const line = (raw || '').trim();
     if (!line) continue;
 
-    // slash-command or bare command
-    const isCmd = line.startsWith('/') || getCommand(line);
+    // slash-command or bare command. A bare word only counts when it IS the
+    // command (no arguments) — otherwise natural sentences whose first word
+    // happens to be a command name ("image of a cat", "search the web for…")
+    // hijacked the conversation into running that command.
+    const isCmd = line.startsWith('/') || (line.split(' ').length === 1 && !!getCommand(line));
     if (isCmd) {
       const [name, ...rest] = line.replace(/^\//, '').split(' ');
       const arg = rest.join(' ');
@@ -83,7 +99,7 @@ export async function startRepl() {
     const routed = findAgent(line);
     if (routed) {
       echoUser(line);
-      const msgs = injectStaged([{ role: 'system', content: routed.agent.system }, ...history, { role: 'user', content: routed.message }], staged);
+      const msgs = injectStaged([{ role: 'system', content: routed.agent.system }, ...windowHistory(history), { role: 'user', content: routed.message }], staged);
       await streamChat(msgs, history, routed.message, { model: routed.agent.model });
       continue;
     }
@@ -92,7 +108,7 @@ export async function startRepl() {
     echoUser(line);
     const cfg = config.read();
     const r = route(line, cfg, { staged: staged.length });
-    let msgs = injectStaged([...history, { role: 'user', content: line }], staged);
+    let msgs = injectStaged([...windowHistory(history), { role: 'user', content: line }], staged);
     msgs = withScaffold(msgs, { cot: r.cot });
     await streamChat(msgs, history, line, { model: r.model, tier: r.tier, complexity: r.complexity });
   }
@@ -102,6 +118,24 @@ export async function startRepl() {
 function injectStaged(messages, staged) {
   const ctx = stagedContext(staged);
   return ctx ? [{ role: 'system', content: ctx }, ...messages] : messages;
+}
+
+// Keep the prompt context within a budget: recent turns are sent verbatim,
+// older ones drop off (the full transcript stays reviewable via /history).
+// Previously history grew unbounded, which eventually overflows the model's
+// context window on long sessions.
+const CONTEXT_MAX_CHARS = 12000;
+const CONTEXT_MAX_TURNS = 30;
+function windowHistory(history) {
+  const out = [];
+  let used = 0;
+  for (let i = history.length - 1; i >= 0 && out.length < CONTEXT_MAX_TURNS; i--) {
+    const cost = (history[i].content || '').length;
+    if (out.length >= 2 && used + cost > CONTEXT_MAX_CHARS) break;
+    out.unshift(history[i]);
+    used += cost;
+  }
+  return out;
 }
 
 function getCommand(line) {
@@ -128,6 +162,7 @@ async function runCommand(name, arg, { history, allSkills, staged }) {
     case 'deploy': case 'push': await runDeploy(arg); return;
     case 'route': await configureRoute(); return;
     case 'states': await demoStates(); return;
+    case 'history': showHistory(history); return;
     case 'music': await connectMusic(); return;
     case 'play': await doPlay(arg); return;
     case 'playlists': await doPlaylists(); return;
@@ -378,6 +413,20 @@ async function doSearch(arg, history) {
 
 function truncate(s, n) {
   return s.length > n ? s.slice(0, n - 1) + '…' : s;
+}
+
+// /history — print the session transcript (turn-by-turn, compact).
+function showHistory(history) {
+  if (!history.length) { console.log(c.dim('\n  No conversation yet this session.\n')); return; }
+  console.log('\n  ' + c.gold(glyph.spark + ' Session history') + c.dim('   ' + (history.length / 2) + ' turn' + (history.length === 2 ? '' : 's')) + '\n');
+  for (let i = 0; i < history.length; i += 2) {
+    const u = history[i], a = history[i + 1] || { content: '' };
+    console.log('  ' + c.orange(glyph.prompt + ' you') + c.dim('   turn ' + (i / 2 + 1)));
+    console.log('  ' + c.white(truncate(String(u.content || '').replace(/\s+/g, ' '), 110)));
+    console.log('  ' + c.gold(glyph.spark + ' 700') + c.dim('  ·  ~' + Math.max(1, Math.round(a.content.length / 4)) + ' tok'));
+    console.log('  ' + c.faint(truncate(String(a.content || '').replace(/\s+/g, ' '), 110)));
+    console.log('');
+  }
 }
 
 // Build mode: model returns files; each is streamed into the live window.

@@ -76,6 +76,7 @@ async function pickSlash(commands, output, input = process.stdin) {
     let query = '';   // characters typed after the "/"
     let sel = 0;
     let drawn = 0;    // dynamic lines currently on screen (for erase)
+    let scroll = 0;   // first visible row index in the result list
 
     // Header — rebuilt on resize so the rules fit the new width.
     function writeHeader() {
@@ -97,13 +98,20 @@ async function pickSlash(commands, output, input = process.stdin) {
     function render() {
       const res = results();
       sel = Math.min(sel, Math.max(0, res.length - 1));
+      // Sliding window: the selection must always be visible, so the list
+      // scrolls under it. (Previously rows beyond `limit` were selectable but
+      // never rendered — long command lists simply couldn't be scrolled.)
+      if (sel < scroll) scroll = sel;
+      if (sel >= scroll + limit) scroll = sel - limit + 1;
+      scroll = Math.max(0, Math.min(scroll, Math.max(0, res.length - limit)));
       const lines = [];
+      const at = res.length ? (sel + 1) + '/' + res.length : '0';
       // The query line renders the "/" as part of the text, so the user sees
       // it — and can backspace it away (which closes the palette).
       lines.push('  ' + c.gold('❯ /') + c.white(query)
-        + (res.length ? c.faint('   ' + res.length + ' command' + (res.length === 1 ? '' : 's')) : c.red('  no match — ⌫ to go back')));
+        + (res.length ? c.faint('   ' + at) : c.red('  no match — ⌫ to go back')));
       for (let i = 0; i < limit; i++) {
-        const cmd = res[i];
+        const cmd = res[scroll + i];
         if (!cmd) { lines.push(''); continue; }
         const st = groupStyle(cmd.group);
         const name = ('/' + cmd.name).padEnd(nameW);
@@ -158,8 +166,12 @@ async function pickSlash(commands, output, input = process.stdin) {
         else return finish(''); // deleting the "/" itself exits back to the box
         sel = 0; render(); return;
       }
-      if (key.name === 'up') { sel = Math.max(0, sel - 1); render(); return; }
-      if (key.name === 'down') { sel = Math.min(Math.max(0, results().length - 1), sel + 1); render(); return; }
+      if (key.name === 'up') { if (sel > 0) sel--; render(); return; }
+      if (key.name === 'down') { if (sel < results().length - 1) sel++; render(); return; }
+      if (key.name === 'pageup') { sel = Math.max(0, sel - limit); render(); return; }
+      if (key.name === 'pagedown') { sel = Math.min(Math.max(0, results().length - 1), sel + limit); render(); return; }
+      if (key.name === 'home') { sel = 0; render(); return; }
+      if (key.name === 'end') { sel = Math.max(0, results().length - 1); render(); return; }
       if (str && !key.ctrl && !key.meta) {
         const printable = [...str].filter((ch) => ch.codePointAt(0) >= 32).join('');
         if (printable) { query += printable; sel = 0; render(); }
@@ -170,6 +182,17 @@ async function pickSlash(commands, output, input = process.stdin) {
     writeHeader();
     render();
   });
+}
+
+// Session-wide input history for ↑/↓ recall (messages and commands alike).
+const inputHistory = [];
+function rememberInput(line) {
+  const l = String(line || '').trim();
+  if (!l) return;
+  if (inputHistory[inputHistory.length - 1] !== l) {
+    inputHistory.push(l);
+    if (inputHistory.length > 100) inputHistory.shift();
+  }
 }
 
 export function boxInput({ input = process.stdin, output = process.stdout, indent = 2, width, placeholder = '', commands = [] } = {}) {
@@ -191,10 +214,17 @@ export function boxInput({ input = process.stdin, output = process.stdout, inden
     let buf = '';
     let pos = 0;
     let drawn = false;
+    let hist = inputHistory.length; // ↑/↓ browse cursor (=== len → live editing)
+    let draft = '';                 // text typed before history recall started
+    let pasteMode = false;          // inside a bracketed-paste marker block
 
     if (isReal) {
       readline.emitKeypressEvents(input);
       if (input.isTTY) input.setRawMode(true);
+      // Bracketed paste: supported terminals wrap pastes in \x1B[200~ …
+      // \x1B[201~ markers, letting us fold pasted newlines into spaces instead
+      // of submitting the box mid-paste. Ignored harmlessly if unsupported.
+      output.write('\x1B[?2004h');
     }
     input.resume?.();
 
@@ -257,12 +287,24 @@ export function boxInput({ input = process.stdin, output = process.stdout, inden
     function cleanup() {
       input.off('keypress', onKey);
       unregisterRefresh(boxRefresh);
-      if (isReal && input.isTTY) input.setRawMode(false);
+      if (isReal && input.isTTY) { input.setRawMode(false); output.write('\x1B[?2004l'); }
     }
 
     function onKey(str, key) {
       key = key || {};
-      if (key.ctrl && key.name === 'c') { cleanup(); output.write('\n'); process.exit(0); return; }
+      // Bracketed-paste markers. Terminals deliver \x1B[200~ / \x1B[201~ as
+      // parsed-CSI key events (key.sequence) or raw text (str) depending on
+      // the decoder — accept both shapes.
+      const seq = key.sequence || (typeof str === 'string' && str.startsWith('\x1B[') ? str : '');
+      if (seq && /200~$/.test(seq)) { pasteMode = true; return; }
+      if (seq && /201~$/.test(seq)) { pasteMode = false; return; }
+      if (key.ctrl && key.name === 'c') {
+        // Ctrl+C: clear typed text first — exiting on a non-empty line loses
+        // work. Only an empty line exits (previous behaviour killed the app
+        // even mid-sentence).
+        if (buf.length) { buf = ''; pos = 0; render(); return; }
+        cleanup(); output.write('\n'); process.exit(0); return;
+      }
       // Typing "/" on an empty line opens the scrollable skills picker.
       if (buf === '' && str === '/' && !key.ctrl && !key.meta && commands.length) {
         cleanup();
@@ -270,8 +312,12 @@ export function boxInput({ input = process.stdin, output = process.stdout, inden
         pickSlash(commands, output, input).then(resolve);
         return;
       }
+      // Inside a paste, Enter folds into a space (collapsing consecutive ones
+      // so \r\n line endings don't double up); typed Enter still submits.
       if (key.name === 'return' || key.name === 'enter') {
+        if (pasteMode) { if (buf[pos - 1] !== ' ') { buf = buf.slice(0, pos) + ' ' + buf.slice(pos); pos++; } render(); return; }
         cleanup();
+        rememberInput(buf);
         // Erase the whole box on submit so the sent text doesn't stay stacked
         // on screen. The cursor sits on the middle (input) line, so step up to
         // the top border and clear everything below it. The REPL then echoes a
@@ -286,15 +332,33 @@ export function boxInput({ input = process.stdin, output = process.stdout, inden
       if (key.name === 'right') { if (pos < buf.length) pos++; render(); return; }
       if (key.name === 'home') { pos = 0; render(); return; }
       if (key.name === 'end') { pos = buf.length; render(); return; }
+      // ↑/↓ recall session input history (messages and commands alike).
+      if (key.name === 'up') {
+        if (!inputHistory.length || hist === 0) return;
+        if (hist === inputHistory.length) draft = buf;
+        hist--;
+        buf = inputHistory[hist]; pos = buf.length; render(); return;
+      }
+      if (key.name === 'down') {
+        if (hist >= inputHistory.length) return;
+        hist++;
+        buf = hist === inputHistory.length ? draft : inputHistory[hist];
+        pos = buf.length; render(); return;
+      }
       // Esc with text in the box clears it (with the palette closed, Esc is a
       // no-op on an empty box). Bare \x1b / Ctrl+[ forms accepted too.
       const isEsc = key.name === 'escape' || str === '\x1b' || (key.ctrl && key.name === '[');
       if (isEsc && buf.length) { buf = ''; pos = 0; render(); return; }
       if (str && !key.ctrl && !key.meta) {
-        const printable = [...str].filter((ch) => ch.codePointAt(0) >= 32).join('');
+        // Multi-line pastes: fold newlines/tabs into spaces instead of
+        // silently dropping them.
+        const printable = [...str]
+          .map((ch) => (ch === '\n' || ch === '\r' || ch === '\t' ? ' ' : ch))
+          .filter((ch) => ch.codePointAt(0) >= 32).join('');
         if (printable) {
           buf = buf.slice(0, pos) + printable + buf.slice(pos);
           pos += printable.length;
+          hist = inputHistory.length; // editing leaves browse mode
           render();
         }
       }
